@@ -1,46 +1,50 @@
-# clients/client.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from models.lstm_model import TrafficPredictor
-from utils.data_preprocess import load_real_traffic_data, prepare_sequences
+import pandas as pd
 import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from models.lstm_model import TrafficPredictor
+
+# ----- Sequence preparation -----
+def prepare_sequences(series, seq_len=10):
+    X, y = [], []
+    for i in range(len(series) - seq_len):
+        X.append(series[i:i+seq_len])
+        y.append(series[i+seq_len])
+    return np.array(X), np.array(y)
 
 
-def train_local_model(filepath='data/traffic_data.csv', column='bandwidth_usage',
-                      seq_len=10, epochs=5, lr=0.001, device=None):
+def train_local_model(filepath, seq_len=10, epochs=30, lr=0.001, global_model_state=None):
     """
-    Loads data from filepath, prepares sequences, and trains a local LSTM.
-    Returns the model state_dict and final loss (float).
+    Trains the local LSTM model on a client's dataset.
+    Returns updated state_dict and final loss.
     """
+    # Load and normalize column 'down' (for simplicity)
+    df = pd.read_csv(filepath)
+    series = df['down'].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    series_scaled = scaler.fit_transform(series)
 
-    # auto-detect device
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Load and preprocess real traffic data
-    series, scaler = load_real_traffic_data(filepath, column)
-    X, y = prepare_sequences(series, seq_len=seq_len)
-
-    # Convert numpy arrays to torch tensors
-    X = torch.tensor(X, dtype=torch.float32).to(device)
-    y = torch.tensor(y, dtype=torch.float32).to(device)
+    X_np, y_np = prepare_sequences(series_scaled, seq_len)
+    X = torch.tensor(X_np, dtype=torch.float32)
+    y = torch.tensor(y_np, dtype=torch.float32)
 
     # Initialize model
-    model = TrafficPredictor(input_size=1, hidden_size=50, num_layers=2, output_size=1).to(device)
+    model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+    if global_model_state is not None:
+        model.load_state_dict(global_model_state)
+    model.train()
+
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # Training loop
-    model.train()
-    final_loss = None
     for epoch in range(epochs):
         optimizer.zero_grad()
-        outputs = model(X)
-        loss = criterion(outputs, y)
+        output = model(X)
+        loss = criterion(output, y)
         loss.backward()
         optimizer.step()
-        final_loss = loss.item()
-        # Optional: print training progress
-        # print(f"[Client] Epoch {epoch+1}/{epochs}, Loss: {final_loss:.6f}")
 
-    return model.state_dict(), final_loss
+    return model.state_dict(), loss.item()

@@ -1,29 +1,22 @@
-# main.py
 import torch
 import os
-import copy
 import pandas as pd
-from models.lstm_model import TrafficPredictor
-from server.aggregator import average_models
+from models.lstm_model import TrafficPredictor, load_model_from_checkpoint
 from clients.client import train_local_model
 
-
 # ------------------ USER SETTINGS ------------------
-NUM_CLIENTS = 3                # number of clients
-ROUNDS = 10                     # number of federated rounds
-EPOCHS_PER_CLIENT = 5          # local training epochs per client
-SEQ_LEN = 10                   # sequence length for LSTM
-LR = 0.005                    # learning rate
-DATA_FOLDER = "data"           # folder containing traffic_data.csv
+NUM_CLIENTS = 3
+ROUNDS = 10
+EPOCHS_PER_CLIENT = 30
+SEQ_LEN = 10
+LR = 0.001
+DATA_FOLDER = "data"
 BASE_CSV = os.path.join(DATA_FOLDER, "traffic_data.csv")
+GLOBAL_MODEL_PATH = "global_model.pth"
 # ---------------------------------------------------
 
-
+# --- Split CSV among clients ---
 def split_csv_for_clients(base_csv, num_clients, out_folder="data"):
-    """
-    Splits a single CSV into multiple smaller client files
-    to simulate local datasets (non-IID).
-    """
     df = pd.read_csv(base_csv)
     n = len(df)
     chunk_size = n // num_clients
@@ -40,48 +33,59 @@ def split_csv_for_clients(base_csv, num_clients, out_folder="data"):
     return client_files
 
 
-def run_federated_training():
-    """Run full federated learning simulation."""
-    # 1️⃣ Split dataset among clients
-    client_files = split_csv_for_clients(BASE_CSV, NUM_CLIENTS, out_folder=DATA_FOLDER)
-    print("Client data files:", client_files)
+# --- Federated training ---
+def average_models(state_dicts, weights):
+    avg_state = {}
+    total_weight = sum(weights)
+    for key in state_dicts[0].keys():
+        avg_state[key] = sum([state_dicts[i][key] * weights[i] for i in range(len(state_dicts))]) / total_weight
+    return avg_state
 
-    # 2️⃣ Initialize the global LSTM model (2 layers)
-   
-    global_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=2, output_size=1)
+
+def run_federated_training():
+    client_files = split_csv_for_clients(BASE_CSV, NUM_CLIENTS, out_folder=DATA_FOLDER)
+    print("📂 Client data files:", client_files)
+
+    # Initialize or load global model
+    if os.path.exists(GLOBAL_MODEL_PATH):
+        print("🔄 Loading existing global model checkpoint...")
+        global_model = load_model_from_checkpoint(GLOBAL_MODEL_PATH, input_size=1, output_size=1)
+    else:
+        print("⚡ Initializing new global model...")
+        global_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
 
     global_state = global_model.state_dict()
 
-    # 3️⃣ Federated Training Rounds
     for r in range(ROUNDS):
-        print(f"\n*** Federated Round {r + 1}/{ROUNDS} ***")
+        print(f"\n==============================")
+        print(f"🌍 Federated Round {r + 1}/{ROUNDS}")
+        print(f"==============================")
         local_states, local_losses, weights = [], [], []
 
-        # Train each client
         for i, cfile in enumerate(client_files):
-            print(f"-> Training client {i + 1} on {cfile}")
+            print(f"🧠 Training client {i + 1} on {cfile}")
             state_dict, loss = train_local_model(
                 filepath=cfile,
                 seq_len=SEQ_LEN,
                 epochs=EPOCHS_PER_CLIENT,
-                lr=LR
+                lr=LR,
+                global_model_state=global_state
             )
             local_states.append(state_dict)
             local_losses.append(loss)
             data_len = len(pd.read_csv(cfile))
             weights.append(data_len)
-            print(f"   Client {i + 1} final loss: {loss:.6f}")
+            print(f"✅ Client {i + 1} final loss: {loss:.6f}")
 
-        # 4️⃣ Aggregate local weights into global model
         avg_state = average_models(local_states, weights)
         global_model.load_state_dict(avg_state)
+        global_state = avg_state
 
         avg_loss = sum(local_losses) / len(local_losses)
-        print(f"Round {r + 1} aggregation done. Avg client loss: {avg_loss:.6f}")
+        print(f"📊 Round {r + 1} completed. Avg client loss: {avg_loss:.6f}")
 
-    # 5️⃣ Save trained global model
-    torch.save(global_model.state_dict(), "global_model.pth")
-    print("\n✅ Federated training complete. Global model saved to 'global_model.pth'.")
+    torch.save(global_model.state_dict(), GLOBAL_MODEL_PATH)
+    print(f"\n✅ Federated training complete. Global model saved to '{GLOBAL_MODEL_PATH}'.\n")
 
 
 if __name__ == "__main__":

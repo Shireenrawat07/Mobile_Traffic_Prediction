@@ -1,60 +1,40 @@
-import os
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
-def load_all_client_data(base_path='data/csv/', columns=['down', 'up', 'rnti_count']):
+def load_real_traffic_data(filepath, column='down'):
     """
-    Loads and normalizes all train/test CSV files from the specified folder.
-    
-    Returns:
-        train_data_dict: dict of client_name -> normalized training DataFrame
-        test_data_dict: dict of client_name -> normalized testing DataFrame
-        scalers: dict of client_name -> fitted MinMaxScaler
+    Loads one numeric column (like 'down' or 'up') from dataset,
+    normalizes it, and returns (scaled_series, scaler).
     """
-    train_data_dict = {}
-    test_data_dict = {}
-    scalers = {}
+    df = pd.read_csv(filepath)
 
-    # --- Loop through all files ---
-    for filename in os.listdir(base_path):
-        if filename.endswith(".csv"):
-            filepath = os.path.join(base_path, filename)
-            df = pd.read_csv(filepath)
+    # Handle timestamp column if present
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values(by='timestamp')
 
-            # Identify client and dataset type
-            parts = filename.replace(".csv", "").split("_")
-            if len(parts) >= 2:
-                data_type, client_name = parts[0], "_".join(parts[1:])
-            else:
-                continue  # skip unexpected files
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in dataset. Available: {list(df.columns)}")
 
-            # Only keep relevant columns (if specified)
-            if all(col in df.columns for col in columns):
-                df = df[columns]
-            else:
-                print(f"⚠️ Skipping {filename} - missing columns {columns}")
-                continue
+    # Extract and scale the selected column
+    series = df[column].values.reshape(-1, 1)
+    scaler = MinMaxScaler()
+    scaled_series = scaler.fit_transform(series)
 
-            # Normalize each client's data
-            scaler = MinMaxScaler()
-            df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=columns)
-
-            # Store in dicts
-            if "train" in data_type.lower():
-                train_data_dict[client_name] = df_scaled
-            elif "test" in data_type.lower():
-                test_data_dict[client_name] = df_scaled
-
-            scalers[client_name] = scaler
-            print(f"✅ Loaded {filename} ({data_type}, {client_name}) with shape {df.shape}")
-
-    return train_data_dict, test_data_dict, scalers
+    return scaled_series, scaler
 
 
-# --- Example usage ---
-if __name__ == "__main__":
-    train_data, test_data, scalers = load_all_client_data()
-
-    print("\nClients loaded:")
-    for client, df in train_data.items():
-        print(f"🧠 {client}: {df.shape}")
+def prepare_sequences(series, seq_len=10):
+    """
+    Converts a time series (1D) into sequences for LSTM.
+    Input: scaled time series (numpy array)
+    Output: (X, y) numpy arrays ready for training
+    """
+    X, y = [], []
+    for i in range(len(series) - seq_len):
+        X.append(series[i:i+seq_len])
+        y.append(series[i+seq_len])
+    X = np.array(X)
+    y = np.array(y)
+    return X, y
