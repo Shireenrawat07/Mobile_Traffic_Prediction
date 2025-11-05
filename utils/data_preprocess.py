@@ -1,34 +1,60 @@
-# utils/data_preprocess.py
+import os
 import pandas as pd
-import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
-def load_real_traffic_data(filepath='data/traffic_data.csv', column='traffic_volume'):
+def load_all_client_data(base_path='data/csv/', columns=['down', 'up', 'rnti_count']):
     """
-    Loads CSV, cleans, normalizes the `column`. Returns df and scaler.
+    Loads and normalizes all train/test CSV files from the specified folder.
+    
+    Returns:
+        train_data_dict: dict of client_name -> normalized training DataFrame
+        test_data_dict: dict of client_name -> normalized testing DataFrame
+        scalers: dict of client_name -> fitted MinMaxScaler
     """
-    df = pd.read_csv(filepath)
-    if column not in df.columns:
-        raise ValueError(f"Column '{column}' not found in CSV. Available columns: {list(df.columns)}")
-    # keep only the time-series column for simplicity
-    series = df[[column]].copy()
-    series = series.fillna(method='ffill').fillna(method='bfill')
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    series_scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+    train_data_dict = {}
+    test_data_dict = {}
+    scalers = {}
 
-    return series, scaler
+    # --- Loop through all files ---
+    for filename in os.listdir(base_path):
+        if filename.endswith(".csv"):
+            filepath = os.path.join(base_path, filename)
+            df = pd.read_csv(filepath)
 
-def prepare_sequences(series_df, seq_len=10):
-    """
-    Converts normalized series into (X, y) sequences for LSTM training.
-    X shape: (num_samples, seq_len, 1)
-    y shape: (num_samples, 1)
-    """
-    data = series_df['normalized'].values
-    X, y = [], []
-    for i in range(len(data) - seq_len):
-        X.append(data[i:i+seq_len])
-        y.append(data[i+seq_len])
-    X = np.array(X).reshape(-1, seq_len, 1)
-    y = np.array(y).reshape(-1, 1)
-    return X, y
+            # Identify client and dataset type
+            parts = filename.replace(".csv", "").split("_")
+            if len(parts) >= 2:
+                data_type, client_name = parts[0], "_".join(parts[1:])
+            else:
+                continue  # skip unexpected files
+
+            # Only keep relevant columns (if specified)
+            if all(col in df.columns for col in columns):
+                df = df[columns]
+            else:
+                print(f"⚠️ Skipping {filename} - missing columns {columns}")
+                continue
+
+            # Normalize each client's data
+            scaler = MinMaxScaler()
+            df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=columns)
+
+            # Store in dicts
+            if "train" in data_type.lower():
+                train_data_dict[client_name] = df_scaled
+            elif "test" in data_type.lower():
+                test_data_dict[client_name] = df_scaled
+
+            scalers[client_name] = scaler
+            print(f"✅ Loaded {filename} ({data_type}, {client_name}) with shape {df.shape}")
+
+    return train_data_dict, test_data_dict, scalers
+
+
+# --- Example usage ---
+if __name__ == "__main__":
+    train_data, test_data, scalers = load_all_client_data()
+
+    print("\nClients loaded:")
+    for client, df in train_data.items():
+        print(f"🧠 {client}: {df.shape}")
