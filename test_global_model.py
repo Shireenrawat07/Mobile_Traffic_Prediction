@@ -1,50 +1,80 @@
-# test_global_model.py
 import torch
-import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from models.lstm_model import TrafficPredictor
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+
+# ✅ Import functions and model
 from utils.data_preprocess import load_real_traffic_data, prepare_sequences
+from models.lstm_model import TrafficPredictor  # ← make sure this file exists
 
+# ====== CONFIG ======
+DATA_PATH = "Dataset/full_dataset.csv"
 MODEL_PATH = "global_model.pth"
-CSV_PATH = "data/traffic_data.csv"
-COLUMN = "bandwidth_usage"
+SCALER_PATH = "scaling_params.pt"
 SEQ_LEN = 10
+COLUMN = 'down'
+# ====================
 
-# Load data
-series, scaler = load_real_traffic_data(CSV_PATH, COLUMN)
-X, y = prepare_sequences(series, seq_len=SEQ_LEN)
 
-X = torch.tensor(X).float()
-y = torch.tensor(y).float()
+def load_and_scale_data(data_path, scaler_path, column):
+    print("📂 Loading dataset and scaler...")
 
-# Load model
-model = TrafficPredictor(input_size=1, hidden_size=50, num_layers=2)
-model.load_state_dict(torch.load(MODEL_PATH))
-model.eval()
+    # load normalized series from your utils/data_preprocess.py
+    scaled_series, _ = load_real_traffic_data(data_path, column=column)
 
-# Predict
-with torch.no_grad():
-    preds = model(X).numpy()
+    # Load scaler params safely (handles both old/new PyTorch versions)
+    params = torch.load(scaler_path, weights_only=False)
 
-# Reverse scaling
-y_true = scaler.inverse_transform(y.numpy().reshape(-1, 1))
-y_pred = scaler.inverse_transform(preds.reshape(-1, 1))
+    scaler = MinMaxScaler()
+    # ✅ handle both key styles ("min"/"scale" or "min_"/"scale_")
+    scaler.min_ = params.get("min", params.get("min_", None))
+    scaler.scale_ = params.get("scale", params.get("scale_", None))
 
-# --- Metrics ---
-mae = mean_absolute_error(y_true, y_pred)
-rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    if scaler.min_ is None or scaler.scale_ is None:
+        raise KeyError("Scaler parameters missing from scaling_params.pt")
 
-print(f"📊 Model Evaluation:")
-print(f"MAE  = {mae:.4f}")
-print(f"RMSE = {rmse:.4f}")
+    return scaled_series
 
-# --- Plot ---
-plt.figure(figsize=(10, 5))
-plt.plot(y_true, label="Actual", color="blue")
-plt.plot(y_pred, label="Predicted", color="orange")
-plt.title("Traffic Prediction (Federated LSTM)")
-plt.xlabel("Time Step")
-plt.ylabel(COLUMN)
-plt.legend()
-plt.show()
+
+def create_sequences(values, seq_len):
+    X, y = [], []
+    for i in range(len(values) - seq_len):
+        X.append(values[i:i + seq_len])
+        y.append(values[i + seq_len])
+    return (
+      
+    torch.tensor(X).float(),   # Already 3D (samples, seq_len, 1)
+    torch.tensor(y).float().unsqueeze(-1)
+)
+
+    
+
+
+def evaluate_model():
+    print("🔍 Evaluating Global Model...")
+    values = load_and_scale_data(DATA_PATH, SCALER_PATH, COLUMN)
+    X, y = create_sequences(values, SEQ_LEN)
+
+    # ✅ Load trained model
+    model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+    model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+    model.eval()
+
+    with torch.no_grad():
+        preds = model(X).squeeze().numpy()
+        actual = y.squeeze().numpy()
+
+    # ✅ Plot results
+    plt.figure(figsize=(10, 5))
+    plt.plot(actual[:200], label="Actual", linewidth=2)
+    plt.plot(preds[:200], label="Predicted", linestyle="--", linewidth=2)
+    plt.title("Global Model Prediction vs Actual (First 200 samples)")
+    plt.xlabel("Time Steps")
+    plt.ylabel("Normalized Traffic Flow")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+if __name__ == "__main__":
+    evaluate_model()
