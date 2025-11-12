@@ -12,7 +12,7 @@ FILE_PATH = "Dataset/full_dataset.csv"
 SEQ_LEN = 10
 COLUMN = "down"
 BATCH_SIZE = 64
-EPOCHS = 50
+EPOCHS = 100
 LR = 0.001
 
 
