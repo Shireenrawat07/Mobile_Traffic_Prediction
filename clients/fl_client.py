@@ -1,77 +1,192 @@
+# fl_client.py
+# Place this file in your clients/ (or fl-client/) folder.
+
+import sys
+import os
+# Ensure project root is importable (so `models` and `utils` import works)
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
+
 import flwr as fl
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from torch.utils.data import TensorDataset, DataLoader
+from pathlib import Path
 
-# -------------------------------
-# Define a simple model
-# -------------------------------
-class SimpleNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(32, 10)
-        self.fc2 = nn.Linear(10, 1)
+# Import your project's model and preprocessing (must exist)
+from models.lstm_model import TrafficPredictor
+from utils.data_preprocess import load_real_traffic_data, prepare_sequences
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+# -----------------------
+# Config (tweak if necessary)
+# -----------------------
+SEQ_LEN = 10
+COLUMN = "down"
+BATCH_SIZE = 64           # use batches so we don't allocate giant tensors
+LR = 0.001
+LOCAL_EPOCHS = 1
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -------------------------------
-# Model utils
-# -------------------------------
-def get_model_weights(model):
-    return [val.cpu().detach().numpy() for val in model.state_dict().values()]
+# Map canonical city keys to dataset file names (loader will attempt variants)
+DEFAULT_CITY_FILES = {
+    "ElBorn": ["Dataset/ElBorn.csv", "Dataset/Elborn.csv", "Dataset/elborn.csv", "Dataset/ElBorn .csv"],
+    "LesCorts": ["Dataset/LesCorts.csv", "Dataset/LesCort.csv", "Dataset/lescorts.csv"],
+    "PobleSec": ["Dataset/PobleSec.csv", "Dataset/PobleSec.csv", "Dataset/poblesec.csv"],
+}
 
-def set_model_weights(model, weights):
+# -----------------------
+# Helpers
+# -----------------------
+def find_city_file(city_name: str):
+    # Try provided candidates then direct path
+    candidates = DEFAULT_CITY_FILES.get(city_name, [])
+    # Also try direct path as provided (in case user passed filename)
+    candidates.append(f"Dataset/{city_name}.csv")
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    # try case-insensitive search in Dataset/
+    dataset_dir = Path("Dataset")
+    if dataset_dir.exists() and dataset_dir.is_dir():
+        for f in dataset_dir.iterdir():
+            if f.is_file() and f.name.lower().startswith(city_name.lower()):
+                return str(f)
+    raise FileNotFoundError(f"No dataset CSV found for '{city_name}'. Tried: {candidates}")
+
+def load_client_data(file_path):
+    # Uses your existing preprocessing functions
+    series, _ = load_real_traffic_data(file_path, COLUMN)  # returns 1D series (numpy)
+    X, y = prepare_sequences(series, SEQ_LEN)              # shapes: (N, seq_len, 1) or (N, seq_len)
+    X = np.array(X)
+    y = np.array(y)
+
+    # Ensure final shape is (N, seq_len, input_size)
+    if X.ndim == 2:
+        X = X.reshape((X.shape[0], X.shape[1], 1))
+
+    # Split train/val (80/20) — clients use these locally
+    n = len(X)
+    if n == 0:
+        raise ValueError(f"No samples found in dataset: {file_path}")
+    split = int(0.8 * n)
+    x_train, y_train = X[:split], y[:split]
+    x_val, y_val = X[split:], y[split:]
+
+    # Convert to tensors
+    x_train_t = torch.tensor(x_train).float()
+    y_train_t = torch.tensor(y_train).float()
+    x_val_t = torch.tensor(x_val).float()
+    y_val_t = torch.tensor(y_val).float()
+
+    train_dataset = TensorDataset(x_train_t, y_train_t)
+    val_dataset = TensorDataset(x_val_t, y_val_t)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
+
+    return train_loader, val_loader, len(train_dataset), len(val_dataset)
+
+
+def get_model_weights(model: nn.Module):
+    return [v.cpu().detach().numpy() for v in model.state_dict().values()]
+
+def set_model_weights(model: nn.Module, weights):
     state_dict = model.state_dict()
     for i, key in enumerate(state_dict.keys()):
+        # preserve ordering -> keeps Layer 0/1/2 output identical
         state_dict[key] = torch.tensor(weights[i])
     model.load_state_dict(state_dict)
 
-# -------------------------------
+# -----------------------
 # Flower client
-# -------------------------------
+# -----------------------
 class FLClient(fl.client.NumPyClient):
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, city_name: str, file_path: str):
+        self.city_name = city_name
+        self.file_path = file_path
+
+        # instantiate LSTM and move to device
+        self.model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        self.model.to(DEVICE)
+
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.SGD(self.model.parameters(), lr=0.01)
-        # Dummy data
-        self.x_train = torch.randn(64, 32)
-        self.y_train = torch.randn(64, 1)
-        self.x_val = torch.randn(16, 32)
-        self.y_val = torch.randn(16, 1)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
+
+        # load data (batches) — this prevents memory explosion
+        self.train_loader, self.val_loader, self.train_count, self.val_count = load_client_data(file_path)
+
+        print(f"\n📁 Loaded dataset for {city_name}: train_samples={self.train_count}, val_samples={self.val_count}")
 
     def get_parameters(self, config=None):
         return get_model_weights(self.model)
 
     def fit(self, parameters, config):
+        # set incoming global parameters
         set_model_weights(self.model, parameters)
         self.model.train()
-        # One epoch for demo
-        self.optimizer.zero_grad()
-        y_pred = self.model(self.x_train)
-        loss = self.criterion(y_pred, self.y_train)
-        loss.backward()
-        self.optimizer.step()
-        return get_model_weights(self.model), len(self.x_train), {}
+
+        epoch_loss = 0.0
+        total_examples = 0
+
+        for _ in range(LOCAL_EPOCHS):
+            for batch_x, batch_y in self.train_loader:
+                batch_x = batch_x.to(DEVICE)
+                batch_y = batch_y.to(DEVICE)
+
+                self.optimizer.zero_grad()
+                outputs = self.model(batch_x)
+                # If model outputs shape (batch, 1) but batch_y may be (batch, seq, 1) or (batch, 1)
+                # adjust shapes as your model expects. Here we assume model returns (batch, 1)
+                loss = self.criterion(outputs.squeeze(), batch_y.squeeze())
+                loss.backward()
+                self.optimizer.step()
+
+                epoch_loss += loss.item() * batch_x.size(0)
+                total_examples += batch_x.size(0)
+
+        avg_loss = (epoch_loss / total_examples) if total_examples > 0 else float("nan")
+        print(f"🏋️ {self.city_name} Training Loss: {avg_loss:.6f}")
+
+        return get_model_weights(self.model), total_examples, {"loss": avg_loss}
 
     def evaluate(self, parameters, config):
+        # set parameters then evaluate on local val set
         set_model_weights(self.model, parameters)
         self.model.eval()
+        total_loss = 0.0
+        total_examples = 0
         with torch.no_grad():
-            y_pred = self.model(self.x_val)
-            loss = self.criterion(y_pred, self.y_val)
-        return float(loss.item()), len(self.x_val), {}
+            for batch_x, batch_y in self.val_loader:
+                batch_x = batch_x.to(DEVICE)
+                batch_y = batch_y.to(DEVICE)
+                outputs = self.model(batch_x)
+                loss = self.criterion(outputs.squeeze(), batch_y.squeeze())
+                total_loss += loss.item() * batch_x.size(0)
+                total_examples += batch_x.size(0)
 
-# -------------------------------
-# Start client
-# -------------------------------
+        avg_loss = (total_loss / total_examples) if total_examples > 0 else float("nan")
+        print(f"🔎 {self.city_name} Eval Loss: {avg_loss:.6f}")
+        return float(avg_loss), total_examples, {"val_loss": avg_loss}
+
+
+# -----------------------
+# CLI / start-up
+# -----------------------
 if __name__ == "__main__":
-    model = SimpleNN()
-    fl.client.start_numpy_client(
-        server_address="localhost:8080",
-        client=FLClient(model)
-    )
+    # usage: python fl_client.py ElBorn
+    if len(sys.argv) < 2:
+        print("Usage: python fl_client.py <CityName> (e.g. ElBorn)")
+        sys.exit(1)
+
+    city = sys.argv[1]
+    try:
+        file_path = find_city_file(city)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    client = FLClient(city, file_path)
+    fl.client.start_numpy_client(server_address=os.environ.get("SERVER_ADDRESS", "localhost:8080"), client=client)
