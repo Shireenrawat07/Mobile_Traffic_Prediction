@@ -15,6 +15,8 @@ import torch.optim as optim
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader
 from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
+
 
 # Import your project's model and preprocessing (must exist)
 from models.lstm_model import TrafficPredictor
@@ -26,8 +28,8 @@ from utils.data_preprocess import load_real_traffic_data, prepare_sequences
 SEQ_LEN = 10
 COLUMN = "down"
 BATCH_SIZE = 64           # use batches so we don't allocate giant tensors
-LR = 0.001
-LOCAL_EPOCHS = 1
+LR = 0.005
+LOCAL_EPOCHS = 3
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Map canonical city keys to dataset file names (loader will attempt variants)
@@ -56,38 +58,49 @@ def find_city_file(city_name: str):
                 return str(f)
     raise FileNotFoundError(f"No dataset CSV found for '{city_name}'. Tried: {candidates}")
 
-def load_client_data(file_path):
-    # Uses your existing preprocessing functions
-    series, _ = load_real_traffic_data(file_path, COLUMN)  # returns 1D series (numpy)
-    X, y = prepare_sequences(series, SEQ_LEN)              # shapes: (N, seq_len, 1) or (N, seq_len)
-    X = np.array(X)
-    y = np.array(y)
 
-    # Ensure final shape is (N, seq_len, input_size)
+
+def load_client_data(file_path):
+    # 1. Load raw series
+    series = load_real_traffic_data(file_path, COLUMN)
+
+    # 2. Scale here (client-side)
+    scaler = MinMaxScaler()
+    scaled_series = scaler.fit_transform(series)
+
+    # 3. Save this client's scaler (optional)
+    torch.save(
+        {"min_": scaler.min_, "scale_": scaler.scale_},
+        f"{file_path}_scaler.pt"
+    )
+
+    # 4. Prepare sequences
+    X, y = prepare_sequences(scaled_series, SEQ_LEN)
+
     if X.ndim == 2:
         X = X.reshape((X.shape[0], X.shape[1], 1))
 
-    # Split train/val (80/20) — clients use these locally
+    # Train/Val split
     n = len(X)
-    if n == 0:
-        raise ValueError(f"No samples found in dataset: {file_path}")
     split = int(0.8 * n)
+
     x_train, y_train = X[:split], y[:split]
     x_val, y_val = X[split:], y[split:]
 
     # Convert to tensors
-    x_train_t = torch.tensor(x_train).float()
-    y_train_t = torch.tensor(y_train).float()
-    x_val_t = torch.tensor(x_val).float()
-    y_val_t = torch.tensor(y_val).float()
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(x_train).float(), torch.tensor(y_train).float()),
+        batch_size=BATCH_SIZE,
+        shuffle=True
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.tensor(x_val).float(), torch.tensor(y_val).float()),
+        batch_size=BATCH_SIZE,
+        shuffle=False
+    )
 
-    train_dataset = TensorDataset(x_train_t, y_train_t)
-    val_dataset = TensorDataset(x_val_t, y_val_t)
+    return train_loader, val_loader, len(x_train), len(x_val)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False)
-
-    return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
 
 def get_model_weights(model: nn.Module):

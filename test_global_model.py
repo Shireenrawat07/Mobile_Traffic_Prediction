@@ -2,38 +2,44 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
+import argparse
+from sklearn.metrics import mean_absolute_error
 
-# ✅ Import functions and model
-from utils.data_preprocess import load_real_traffic_data, prepare_sequences
-from models.lstm_model import TrafficPredictor  # ← make sure this file exists
+# ✅ Import models and utilities
+from utils.data_preprocess import load_real_traffic_data
+from models.lstm_model import TrafficPredictor
+from models.gru_model import TrafficPredictorGRU
 
-# ====== CONFIG ======
+# ===== CONFIG =====
 DATA_PATH = "Dataset/full_dataset.csv"
-MODEL_PATH = "global_model.pth"
+MODEL_PATH = "global_model_gru.pth"
 SCALER_PATH = "scaling_params.pt"
 SEQ_LEN = 10
 COLUMN = 'down'
-# ====================
+
+# ===== Command-line argument for model type =====
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default="lstm",
+                    choices=["lstm", "gru"],
+                    help="Choose model to evaluate")
+args = parser.parse_args()
 
 
 def load_and_scale_data(data_path, scaler_path, column):
-    print("📂 Loading dataset and scaler...")
+    # Load raw series
+    series = load_real_traffic_data(data_path, column=column)
 
-    # load normalized series from your utils/data_preprocess.py
-    scaled_series, _ = load_real_traffic_data(data_path, column=column)
+    # Load scaler params saved during TRAINING
+    scaler_dict = torch.load(scaler_path, weights_only=False)
 
-    # Load scaler params safely (handles both old/new PyTorch versions)
-    params = torch.load(scaler_path, weights_only=False)
+    min_ = scaler_dict["min_"]
+    scale_ = scaler_dict["scale_"]
 
-    scaler = MinMaxScaler()
-    # ✅ handle both key styles ("min"/"scale" or "min_"/"scale_")
-    scaler.min_ = params.get("min", params.get("min_", None))
-    scaler.scale_ = params.get("scale", params.get("scale_", None))
-
-    if scaler.min_ is None or scaler.scale_ is None:
-        raise KeyError("Scaler parameters missing from scaling_params.pt")
+    # Apply SAME scaling used during training
+    scaled_series = (series - min_) * scale_
 
     return scaled_series
+
 
 
 def create_sequences(values, seq_len):
@@ -41,38 +47,64 @@ def create_sequences(values, seq_len):
     for i in range(len(values) - seq_len):
         X.append(values[i:i + seq_len])
         y.append(values[i + seq_len])
-    return (
-      
-    torch.tensor(X).float(),   # Already 3D (samples, seq_len, 1)
-    torch.tensor(y).float().unsqueeze(-1)
-)
 
-    
+    X = torch.tensor(np.array(X)).float()
+    y = torch.tensor(np.array(y)).float().unsqueeze(-1)
+    return X, y
 
 
 def evaluate_model():
     print("🔍 Evaluating Global Model...")
+
+    # Load data
     values = load_and_scale_data(DATA_PATH, SCALER_PATH, COLUMN)
     X, y = create_sequences(values, SEQ_LEN)
 
-    # ✅ Load trained model
-    model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+    # ===== Choose model =====
+    if args.model.lower() == "gru":
+        print("🟢 Evaluating GRU Model")
+        model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3)
+    else:
+        print("🔵 Evaluating LSTM Model")
+        model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+
+    # ===== Load saved global weights =====
     model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
     model.eval()
 
+    # ===== Predict =====
     with torch.no_grad():
         preds = model(X).squeeze().numpy()
         actual = y.squeeze().numpy()
+    
+    # ===== Metrics =====
+    
+    actual_eval = actual[:-200] 
+    preds_eval = preds[:-200] 
+    mae = mean_absolute_error(actual_eval, preds_eval)
+    rmse = np.sqrt(np.mean((actual_eval - preds_eval) ** 2)) 
+    nrmse = rmse / (actual_eval.max() - actual_eval.min())
+  
 
-    # ✅ Plot results
+    print("\n📊 Model Evaluation Metrics:")
+    print(f"MAE   = {mae:.6f}")
+    print(f"NRMSE = {nrmse:.6f}")
+
+    # ===== Plot predictions =====
     plt.figure(figsize=(10, 5))
-    plt.plot(actual[:200], label="Actual", linewidth=2)
-    plt.plot(preds[:200], label="Predicted", linestyle="--", linewidth=2)
-    plt.title("Global Model Prediction vs Actual (First 200 samples)")
+    plt.plot(actual[:-200], label="Actual", linewidth=2)
+    plt.plot(preds[:-200], label="Predicted", linestyle="--", linewidth=2)
+    plt.title(f"{args.model.upper()} Model Predictions vs Actual")
     plt.xlabel("Time Steps")
     plt.ylabel("Normalized Traffic Flow")
     plt.legend()
     plt.grid(True)
+    text = f"MAE: {mae:.6f}\nNRMSE: {nrmse:.6f}"
+    plt.gcf().text(0.02, 0.90, text,
+               fontsize=10,
+               bbox=dict(facecolor='white', alpha=0.8),
+               transform=plt.gca().transAxes)
+
     plt.show()
 
 
