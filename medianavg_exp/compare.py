@@ -20,4 +20,5 @@ plt.ylabel("Loss")
 plt.title("FedAvg vs Median Loss")
 plt.legend()
 plt.grid(True)
+plt.savefig("plots/fed_median_comp.png", dpi=300, bbox_inches="tight")
 plt.show()  # normal scale

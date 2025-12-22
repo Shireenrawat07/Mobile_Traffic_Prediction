@@ -8,11 +8,12 @@ from sklearn.metrics import mean_absolute_error
 # ✅ Import models and utilities
 from utils.data_preprocess import load_real_traffic_data
 from models.lstm_model import TrafficPredictor
+from models.rnn_model import TrafficPredictorRNN
 from models.gru_model import TrafficPredictorGRU
 
 # ===== CONFIG =====
 DATA_PATH = "Dataset/full_dataset.csv"
-MODEL_PATH = "global_model_gru.pth"
+MODEL_PATH = "global_model.pth"
 SCALER_PATH = "scaling_params.pt"
 SEQ_LEN = 10
 COLUMN = 'down'
@@ -62,8 +63,8 @@ def evaluate_model():
 
     # ===== Choose model =====
     if args.model.lower() == "gru":
-        print("🟢 Evaluating GRU Model")
-        model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3)
+        print("🟢 Evaluating GRU model")
+        model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3)
     else:
         print("🔵 Evaluating LSTM Model")
         model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
@@ -92,8 +93,8 @@ def evaluate_model():
 
     # ===== Plot predictions =====
     plt.figure(figsize=(10, 5))
-    plt.plot(actual[:-200], label="Actual", linewidth=2)
-    plt.plot(preds[:-200], label="Predicted", linestyle="--", linewidth=2)
+    plt.plot(actual[:-200],label="Actual", linewidth=2)
+    plt.plot(preds[:-200],label="Predicted", linestyle="--", linewidth=2)
     plt.title(f"{args.model.upper()} Model Predictions vs Actual")
     plt.xlabel("Time Steps")
     plt.ylabel("Normalized Traffic Flow")
@@ -104,7 +105,7 @@ def evaluate_model():
                fontsize=10,
                bbox=dict(facecolor='white', alpha=0.8),
                transform=plt.gca().transAxes)
-
+    plt.savefig("plots/prediction_lstm.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 

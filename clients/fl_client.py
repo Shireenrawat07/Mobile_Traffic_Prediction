@@ -20,6 +20,8 @@ from sklearn.preprocessing import MinMaxScaler
 
 # Import your project's model and preprocessing (must exist)
 from models.lstm_model import TrafficPredictor
+from models.rnn_model import TrafficPredictorRNN
+from models.gru_model import TrafficPredictorGRU
 from utils.data_preprocess import load_real_traffic_data, prepare_sequences
 
 # -----------------------
@@ -123,6 +125,8 @@ class FLClient(fl.client.NumPyClient):
 
         # instantiate LSTM and move to device
         self.model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        # self.model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        # self.model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
         self.model.to(DEVICE)
 
         self.criterion = nn.MSELoss()

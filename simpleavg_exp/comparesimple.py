@@ -18,4 +18,5 @@ plt.ylabel("Loss")
 plt.title("FedAvg vs Simple Loss")
 plt.legend()
 plt.grid(True)
+plt.savefig("plots/simple_fed_comp.png", dpi=300, bbox_inches="tight")
 plt.show()  # normal scale

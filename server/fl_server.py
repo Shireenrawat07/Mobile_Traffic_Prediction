@@ -16,6 +16,7 @@ from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 
 from models.lstm_model import TrafficPredictor
 from models.gru_model import TrafficPredictorGRU
+from models.rnn_model import TrafficPredictorRNN
 
 # ---------------------------
 # Logging FedAvg results
@@ -91,6 +92,8 @@ class FedCustom(fl.server.strategy.FedAvg):
         # ---------------------------
         final_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
         # final_model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        # final_model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+
         weights_list = parameters_to_ndarrays(aggregated_parameters)
         state_dict = final_model.state_dict()
         for i, key in enumerate(state_dict.keys()):
@@ -107,6 +110,7 @@ class FedCustom(fl.server.strategy.FedAvg):
 if __name__ == "__main__":
     # Initial model for starting parameters
     base_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+    # base_model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3, output_size=1)
     # base_model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
 
     initial_ndarrays = [v.cpu().detach().numpy() for v in base_model.state_dict().values()]
