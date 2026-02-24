@@ -99,7 +99,7 @@ class FedCustom(fl.server.strategy.FedAvg):
         for i, key in enumerate(state_dict.keys()):
             state_dict[key] = torch.tensor(weights_list[i])
         final_model.load_state_dict(state_dict)
-        torch.save(final_model.state_dict(), "global_model.pth")
+        torch.save(final_model.state_dict(), "global_model_before.pth")
         print(f"✅ Global model saved after round {rnd}.")
 
         return aggregated_parameters, {}

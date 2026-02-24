@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
-def load_data(filepath="data/traffic_data.csv"):
+def load_data(filepath="dataset/full_dataset.csv"):
     """
     Loads and preprocesses the mobile traffic dataset for model training.
     - Reads CSV
@@ -15,8 +15,8 @@ def load_data(filepath="data/traffic_data.csv"):
     df = pd.read_csv(filepath)
 
     # Convert timestamp to datetime and sort
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values(by=["timestamp"])
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.sort_values(by=["time"])
 
     # --- Feature Engineering ---
     # Create total traffic as target variable (down + up)
@@ -43,15 +43,15 @@ def load_data(filepath="data/traffic_data.csv"):
     return X_train, y_train, X_test, y_test, df
 
 
-def get_client_datasets(filepath="data/traffic_data.csv", group_by="timestamp"):
+def get_client_datasets(filepath="dataset/full_dataset.csv", group_by="time"):
     """
     Splits dataset into smaller 'clients' (optional grouping, e.g., by day/hour).
     Currently groups by time slices, can be customized for federated setups.
     """
 
     df = pd.read_csv(filepath)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values(by=["timestamp"])
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.sort_values(by=["time"])
 
     # Create total traffic column
     df["traffic"] = df["down"] + df["up"]
@@ -59,7 +59,7 @@ def get_client_datasets(filepath="data/traffic_data.csv", group_by="timestamp"):
     clients_data = {}
 
     # Example grouping: by day
-    df["day"] = df["timestamp"].dt.date
+    df["day"] = df["time"].dt.date
     days = df["day"].unique()
 
     for day in days:
