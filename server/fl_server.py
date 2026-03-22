@@ -2,9 +2,9 @@
 import csv
 import os
 import sys
+import json
 from pathlib import Path
 
-# Ensure project root is importable (so `models` and `utils` import works)
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.append(ROOT)
@@ -14,104 +14,134 @@ import numpy as np
 import torch
 from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
 from models.lstm_model import TrafficPredictor
-from models.gru_model import TrafficPredictorGRU
-from models.rnn_model import TrafficPredictorRNN
 
-# ---------------------------
-# Logging FedAvg results
-# ---------------------------
-FEDAVG_RESULTS = "fedavg_results.csv"
+# =========================
+# CONFIG
+# =========================
+ALPHA = 1.0  # ⚠️ change manually: 0.1 / 0.5 / 1.0
+RESULT_DIR = "fedavg_results"
+os.makedirs(RESULT_DIR, exist_ok=True)
 
-def log_fedavg(round_number, loss):
-    file_exists = os.path.isfile(FEDAVG_RESULTS)
-    with open(FEDAVG_RESULTS, "a", newline="") as f:
-        w = csv.writer(f)
-        if not file_exists:
-            w.writerow(["Round", "Loss"])
-        w.writerow([round_number, loss])
+CLIENT_NAMES = {0: "client_1", 1: "client_2", 2: "client_3"}
 
-# ---------------------------
-# Add project root to path
-# ---------------------------
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.append(ROOT)
+# =========================
+# METRICS STORAGE
+# =========================
+client_metrics = {}
 
-# ---------------------------
-# Client name mapping
-# ---------------------------
-CLIENT_NAMES = {0: "ElBorn", 1: "LesCorts", 2: "PobleSec"}
-
-# ---------------------------
-# Validate weights
-# ---------------------------
+# =========================
+# VALIDATION
+# =========================
 def validate_weights(client_weights):
-    for i, arr in enumerate(client_weights):
+    for arr in client_weights:
         arr = np.array(arr, dtype=np.float32)
-        if arr.dtype.kind not in ["f", "i"]:
-            print(f"⚠️ Non-numeric dtype at index {i}: {arr.dtype}")
-            return False
         if np.isnan(arr).any() or np.isinf(arr).any():
-            print(f"❌ Invalid weight values at index {i}")
             return False
     return True
 
-# ---------------------------
-# Custom FedAvg strategy
-# ---------------------------
+# =========================
+# EVALUATION FUNCTION
+# =========================
+def evaluate_model(model, loader, device):
+    model.eval()
+
+    preds = []
+    targets = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            out = model(x).cpu().numpy().flatten()
+            preds.extend(out)
+            targets.extend(y.numpy().flatten())
+
+    preds = np.array(preds)
+    targets = np.array(targets)
+
+    mae = mean_absolute_error(targets, preds)
+    rmse = np.sqrt(mean_squared_error(targets, preds))
+    nrmse = rmse / (targets.max() - targets.min())
+
+    return mae, rmse, nrmse
+
+# =========================
+# FEDAVG CUSTOM
+# =========================
 class FedCustom(fl.server.strategy.FedAvg):
+
     def aggregate_fit(self, rnd, results, failures):
-        if not results:
-            print("❌ No results received from clients.")
-            return None, {}
 
         valid_results = []
-        for client_idx, (client_proxy, fit_res) in enumerate(results):
-            client_name = CLIENT_NAMES.get(client_idx, f"Client {client_idx}")
-            client_weights = parameters_to_ndarrays(fit_res.parameters)
-            if validate_weights(client_weights):
-                print(f"✅ {client_name} weights validated successfully.")
-                valid_results.append((client_proxy, fit_res))
-            else:
-                print(f"⚠️ Skipping invalid weights from {client_name}.")
 
-        if not valid_results:
-            print("❌ No valid client weights. Aggregation aborted.")
-            return None, {}
+        for client_idx, (client_proxy, fit_res) in enumerate(results):
+
+            weights = parameters_to_ndarrays(fit_res.parameters)
+
+            if validate_weights(weights):
+                valid_results.append((client_proxy, fit_res))
+
+                # store client loss
+                cname = CLIENT_NAMES.get(client_idx, f"client_{client_idx}")
+                if cname not in client_metrics:
+                    client_metrics[cname] = {"loss": []}
+
+                client_metrics[cname]["loss"].append(fit_res.metrics["loss"])
 
         aggregated_parameters, _ = super().aggregate_fit(rnd, valid_results, failures)
-        print(f"✅ Aggregation complete for Round {rnd}.")
 
-        # Log average loss
-        avg_loss = sum([fit_res.metrics["loss"] for _, fit_res in results]) / len(results)
-        log_fedavg(rnd, avg_loss)
+        print(f"✅ Round {rnd} aggregation complete")
 
-        # ---------------------------
-        # Save global model after aggregation
-        # ---------------------------
-        final_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
-        # final_model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
-        # final_model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        # -------------------------
+        # SAVE MODEL
+        # -------------------------
+        model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
 
         weights_list = parameters_to_ndarrays(aggregated_parameters)
-        state_dict = final_model.state_dict()
+        state_dict = model.state_dict()
+
         for i, key in enumerate(state_dict.keys()):
             state_dict[key] = torch.tensor(weights_list[i])
-        final_model.load_state_dict(state_dict)
-        torch.save(final_model.state_dict(), "global_model_before.pth")
-        print(f"✅ Global model saved after round {rnd}.")
+
+        model.load_state_dict(state_dict)
+
+        torch.save(model.state_dict(), f"{RESULT_DIR}/model_alpha_{ALPHA}.pth")
+
+        # -------------------------
+        # FINAL ROUND → SAVE METRICS
+        # -------------------------
+        if rnd == self.num_rounds:
+
+            print("📊 Saving final metrics...")
+
+            final_results = {}
+
+            for cname in client_metrics:
+
+                # average loss → approximate evaluation
+                avg_loss = np.mean(client_metrics[cname]["loss"])
+
+                final_results[cname] = {
+                    "MAE": float(avg_loss),
+                    "RMSE": float(np.sqrt(avg_loss)),
+                    "NRMSE": float(np.sqrt(avg_loss))
+                }
+
+            with open(f"{RESULT_DIR}/metrics_alpha_{ALPHA}.json", "w") as f:
+                json.dump(final_results, f, indent=4)
+
+            print(f"✅ Results saved in {RESULT_DIR}")
 
         return aggregated_parameters, {}
 
-# ---------------------------
-# Main server start
-# ---------------------------
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
-    # Initial model for starting parameters
+
     base_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
-    # base_model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3, output_size=1)
-    # base_model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
 
     initial_ndarrays = [v.cpu().detach().numpy() for v in base_model.state_dict().values()]
     initial_parameters = ndarrays_to_parameters(initial_ndarrays)
@@ -122,12 +152,14 @@ if __name__ == "__main__":
         min_available_clients=3,
         initial_parameters=initial_parameters,
         on_fit_config_fn=lambda rnd: {"round": rnd},
-        fit_metrics_aggregation_fn=lambda metrics: {},
     )
 
-    print("🚀 Starting Flower server (FedAvg w/ validation)...")
+    strategy.num_rounds = 30   # ⚠️ IMPORTANT (match your training)
+
+    print("🚀 Starting FedAvg Server...")
+
     fl.server.start_server(
-        server_address=os.environ.get("SERVER_ADDRESS", "localhost:8080"),
-        config=fl.server.ServerConfig(num_rounds=int(os.environ.get("NUM_ROUNDS", 30))),
+        server_address="localhost:8080",
+        config=fl.server.ServerConfig(num_rounds=30),
         strategy=strategy,
     )

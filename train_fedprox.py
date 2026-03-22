@@ -20,7 +20,7 @@ def nrmse(y_true, y_pred):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 batch_size = 32
 local_epochs = 1
-num_rounds = 5
+num_rounds = 30
 mu = 0.001
 input_size = 5
 output_size = 1
