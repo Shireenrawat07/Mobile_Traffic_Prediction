@@ -13,7 +13,7 @@ from models.gru_model import TrafficPredictorGRU
 
 # ===== CONFIG =====
 DATA_PATH = "Dataset/full_dataset.csv"
-MODEL_PATH = "global_model.pth"
+MODEL_PATH = "global_model_rnn.pth"
 SCALER_PATH = "scaling_params.pt"
 SEQ_LEN = 10
 COLUMN = 'down'
@@ -21,7 +21,7 @@ COLUMN = 'down'
 # ===== Command-line argument for model type =====
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="lstm",
-                    choices=["lstm", "gru"],
+                    choices=["lstm", "rnn"],
                     help="Choose model to evaluate")
 args = parser.parse_args()
 
@@ -62,8 +62,8 @@ def evaluate_model():
     X, y = create_sequences(values, SEQ_LEN)
 
     # ===== Choose model =====
-    if args.model.lower() == "gru":
-        print("🟢 Evaluating GRU model")
+    if args.model.lower() == "rnn":
+        print("🟢 Evaluating RNN model")
         model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3)
     else:
         print("🔵 Evaluating LSTM Model")
@@ -90,6 +90,28 @@ def evaluate_model():
     print("\n📊 Model Evaluation Metrics:")
     print(f"MAE   = {mae:.6f}")
     print(f"NRMSE = {nrmse:.6f}")
+    # ===========================
+# SAVE METRICS TO CSV
+# ===========================
+    import pandas as pd
+    import os
+
+    model_name = args.model.upper()
+
+    new_row = pd.DataFrame([{
+        "Model": model_name,
+        "MAE": mae,
+        "NRMSE": nrmse
+    }])
+
+    file_path = "results/RNN_MODEL_RESULTS.csv"
+
+    if os.path.exists(file_path):
+        new_row.to_csv(file_path, mode='a', header=False, index=False)
+    else:
+        new_row.to_csv(file_path, mode='w', header=True, index=False)
+
+    print("✅ Metrics saved to results/RNN_MODEL_RESULT.csv")
 
     # ===== Plot predictions =====
     plt.figure(figsize=(10, 5))
