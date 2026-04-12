@@ -11,6 +11,7 @@ from simple_aggregator import simple_average_models as simple_average
 # --------------------------
 SIMPLEAVG_RESULTS = "simpleavg_exp/simpleavg_results.csv"
 
+
 def log_simpleavg(rnd, loss):
     file_exists = os.path.isfile(SIMPLEAVG_RESULTS)
     os.makedirs("simpleavg_exp", exist_ok=True)
@@ -30,12 +31,13 @@ if ROOT not in sys.path:
 
 from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 from simple_aggregator import simple_average_models
-from models.lstm_model import TrafficPredictor
+from models.mlp_model import TrafficPredictor  # ✅ MLP model
 
 
 # --------------------------
 # 3. Load model to obtain layer keys
 # --------------------------
+# Dummy model to get ordered state_dict keys
 model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
 state_keys = list(model.state_dict().keys())
 
@@ -44,7 +46,6 @@ state_keys = list(model.state_dict().keys())
 # 4. Strategy Definition
 # --------------------------
 class SimpleAverageStrategy(fl.server.strategy.FedAvg):
-
     def aggregate_fit(self, rnd, results, failures):
 
         if not results:
@@ -68,6 +69,20 @@ class SimpleAverageStrategy(fl.server.strategy.FedAvg):
         # Apply simple average algorithm
         aggregated_state = simple_average(local_states)
 
+        # ✅ Build global MLP model from aggregated weights
+        global_model = TrafficPredictor(
+            input_size=1,
+            hidden_size=128,
+            num_layers=3,
+            output_size=1,
+        )
+        global_model.load_state_dict(aggregated_state)
+
+        # ✅ Save checkpoint to project root
+        ckpt_path = "global_model_mlp.pth"
+        torch.save(global_model.state_dict(), ckpt_path)
+        print(f"💾 Saved aggregated MLP global model to {ckpt_path}")
+
         # Convert state_dict back → list of ndarrays for Flower
         aggregated_list = [aggregated_state[k].cpu().numpy() for k in state_keys]
         aggregated_parameters = ndarrays_to_parameters(aggregated_list)
@@ -89,5 +104,5 @@ if __name__ == "__main__":
     fl.server.start_server(
         server_address="localhost:8090",
         config=fl.server.ServerConfig(num_rounds=30),
-        strategy=SimpleAverageStrategy()
+        strategy=SimpleAverageStrategy(),
     )

@@ -1,28 +1,39 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-import argparse
 from sklearn.metrics import mean_absolute_error
+import argparse
 
 # ✅ Import models and utilities
 from utils.data_preprocess import load_real_traffic_data
 from models.lstm_model import TrafficPredictor
 from models.rnn_model import TrafficPredictorRNN
+from models.lstm_model import TrafficPredictor as LSTMTrafficPredictor
 from models.gru_model import TrafficPredictorGRU
+from models.mlp_model import TrafficPredictorMLP
 
 # ===== CONFIG =====
 DATA_PATH = "Dataset/full_dataset.csv"
 MODEL_PATH = "global_model_rnn.pth"
 SCALER_PATH = "scaling_params.pt"
 SEQ_LEN = 10
-COLUMN = 'down'
+COLUMN = "down"
+
+MODEL_PATH_LSTM = "global_model.pth"
+MODEL_PATH_GRU = "global_model_gru.pth"
+MODEL_PATH_MLP = "global_model_mlp.pth"
 
 # ===== Command-line argument for model type =====
 parser = argparse.ArgumentParser()
-parser.add_argument("--model", type=str, default="lstm",
-                    choices=["lstm", "rnn"],
-                    help="Choose model to evaluate")
+
+parser.add_argument(
+    "--model",
+    type=str,
+    default="lstm",
+    choices=["lstm", "gru","rnn", "mlp"],
+    help="Choose model to evaluate",
+)
+
 args = parser.parse_args()
 
 
@@ -42,11 +53,10 @@ def load_and_scale_data(data_path, scaler_path, column):
     return scaled_series
 
 
-
 def create_sequences(values, seq_len):
     X, y = [], []
     for i in range(len(values) - seq_len):
-        X.append(values[i:i + seq_len])
+        X.append(values[i : i + seq_len])
         y.append(values[i + seq_len])
 
     X = torch.tensor(np.array(X)).float()
@@ -65,27 +75,53 @@ def evaluate_model():
     if args.model.lower() == "rnn":
         print("🟢 Evaluating RNN model")
         model = TrafficPredictorRNN(input_size=1, hidden_size=128, num_layers=3)
+    # ===== Choose model & checkpoint =====
+    model_name = args.model.lower()
+
+    if model_name == "gru":
+        print("🟢 Evaluating GRU Model")
+        model = TrafficPredictorGRU(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        state = torch.load(MODEL_PATH_GRU, weights_only=True)
+
+    elif model_name == "mlp":
+        print("🟣 Evaluating MLP Model")
+        model = TrafficPredictorMLP(
+            input_size=1,
+            hidden_size=128,
+            num_layers=3,
+            output_size=1,
+            seq_len=SEQ_LEN,
+        )
+        state = torch.load(MODEL_PATH_MLP, weights_only=True)
+
     else:
         print("🔵 Evaluating LSTM Model")
-        model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        model = LSTMTrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+        state = torch.load(MODEL_PATH_LSTM, weights_only=True)
 
-    # ===== Load saved global weights =====
-    model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+    # Load weights
+    model.load_state_dict(state)
     model.eval()
+
+    # If needed, reshape X to (batch, seq_len, 1)
+    if X.ndim == 2:
+        X_in = X.unsqueeze(-1)  # (N, seq_len, 1)
+    else:
+        X_in = X
 
     # ===== Predict =====
     with torch.no_grad():
-        preds = model(X).squeeze().numpy()
+        preds = model(X_in).squeeze().numpy()
         actual = y.squeeze().numpy()
-    
+
     # ===== Metrics =====
-    
-    actual_eval = actual[:-200] 
-    preds_eval = preds[:-200] 
+    # (Optionally ignore last 200 if required – same as your old code)
+    actual_eval = actual[:-200]
+    preds_eval = preds[:-200]
+
     mae = mean_absolute_error(actual_eval, preds_eval)
-    rmse = np.sqrt(np.mean((actual_eval - preds_eval) ** 2)) 
+    rmse = np.sqrt(np.mean((actual_eval - preds_eval) ** 2))
     nrmse = rmse / (actual_eval.max() - actual_eval.min())
-  
 
     print("\n📊 Model Evaluation Metrics:")
     print(f"MAE   = {mae:.6f}")
@@ -122,6 +158,7 @@ def evaluate_model():
     plt.ylabel("Normalized Traffic Flow")
     plt.legend()
     plt.grid(True)
+
     text = f"MAE: {mae:.6f}\nNRMSE: {nrmse:.6f}"
     plt.gcf().text(0.02, 0.90, text,
                fontsize=10,

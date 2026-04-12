@@ -20,6 +20,11 @@ from sklearn.preprocessing import MinMaxScaler
 from models.lstm_model import TrafficPredictor
 from models.rnn_model import TrafficPredictorRNN
 from models.gru_model import TrafficPredictorGRU
+
+# Import your project's model and preprocessing (must exist)
+# from models.lstm_model import TrafficPredictor
+from models.mlp_model import TrafficPredictor
+
 from utils.data_preprocess import load_real_traffic_data, prepare_sequences
 
 # -----------------------
