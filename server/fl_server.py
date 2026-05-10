@@ -1,165 +1,361 @@
 # fl_server.py
-import csv
+
 import os
 import sys
 import json
-from pathlib import Path
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        ".."
+    )
+)
+
 if ROOT not in sys.path:
     sys.path.append(ROOT)
 
 import flwr as fl
 import numpy as np
 import torch
-from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from flwr.common import (
+    parameters_to_ndarrays,
+    ndarrays_to_parameters
+)
 
 from models.lstm_model import TrafficPredictor
 
 # =========================
-# CONFIG
+# ALPHA FROM TERMINAL
 # =========================
-ALPHA = 1.0  # ⚠️ change manually: 0.1 / 0.5 / 1.0
-RESULT_DIR = "fedavg_results"
-os.makedirs(RESULT_DIR, exist_ok=True)
+if len(sys.argv) < 2:
 
-CLIENT_NAMES = {0: "client_1", 1: "client_2", 2: "client_3"}
+    print("Usage: python fl_server.py <alpha>")
+    sys.exit(1)
+
+ALPHA = sys.argv[1]
 
 # =========================
-# METRICS STORAGE
+# RESULT DIRECTORY
+# =========================
+RESULT_DIR = "results/fedavg_results"
+
+os.makedirs(
+    RESULT_DIR,
+    exist_ok=True
+)
+
+# =========================
+# CLIENT METRICS STORAGE
 # =========================
 client_metrics = {}
 
 # =========================
-# VALIDATION
+# VALIDATE WEIGHTS
 # =========================
 def validate_weights(client_weights):
+
     for arr in client_weights:
-        arr = np.array(arr, dtype=np.float32)
+
+        arr = np.array(
+            arr,
+            dtype=np.float32
+        )
+
         if np.isnan(arr).any() or np.isinf(arr).any():
             return False
+
     return True
 
-# =========================
-# EVALUATION FUNCTION
-# =========================
-def evaluate_model(model, loader, device):
-    model.eval()
-
-    preds = []
-    targets = []
-
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            out = model(x).cpu().numpy().flatten()
-            preds.extend(out)
-            targets.extend(y.numpy().flatten())
-
-    preds = np.array(preds)
-    targets = np.array(targets)
-
-    mae = mean_absolute_error(targets, preds)
-    rmse = np.sqrt(mean_squared_error(targets, preds))
-    nrmse = rmse / (targets.max() - targets.min())
-
-    return mae, rmse, nrmse
 
 # =========================
-# FEDAVG CUSTOM
+# CUSTOM FEDAVG
 # =========================
 class FedCustom(fl.server.strategy.FedAvg):
 
-    def aggregate_fit(self, rnd, results, failures):
+    # -------------------------
+    # AGGREGATE FIT
+    # -------------------------
+    def aggregate_fit(
+        self,
+        rnd,
+        results,
+        failures
+    ):
 
         valid_results = []
 
-        for client_idx, (client_proxy, fit_res) in enumerate(results):
+        for client_proxy, fit_res in results:
 
-            weights = parameters_to_ndarrays(fit_res.parameters)
+            weights = parameters_to_ndarrays(
+                fit_res.parameters
+            )
 
             if validate_weights(weights):
-                valid_results.append((client_proxy, fit_res))
 
-                # store client loss
-                cname = CLIENT_NAMES.get(client_idx, f"client_{client_idx}")
-                if cname not in client_metrics:
-                    client_metrics[cname] = {"loss": []}
+                valid_results.append(
+                    (client_proxy, fit_res)
+                )
 
-                client_metrics[cname]["loss"].append(fit_res.metrics["loss"])
+        if len(valid_results) == 0:
+            return None, {}
 
-        aggregated_parameters, _ = super().aggregate_fit(rnd, valid_results, failures)
+        aggregated_parameters, _ = super().aggregate_fit(
+            rnd,
+            valid_results,
+            failures
+        )
 
-        print(f"✅ Round {rnd} aggregation complete")
-
-        # -------------------------
-        # SAVE MODEL
-        # -------------------------
-        model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
-
-        weights_list = parameters_to_ndarrays(aggregated_parameters)
-        state_dict = model.state_dict()
-
-        for i, key in enumerate(state_dict.keys()):
-            state_dict[key] = torch.tensor(weights_list[i])
-
-        model.load_state_dict(state_dict)
-
-        torch.save(model.state_dict(), f"{RESULT_DIR}/model_alpha_{ALPHA}.pth")
+        print(
+            f"\n✅ Round {rnd} aggregation complete"
+        )
 
         # -------------------------
-        # FINAL ROUND → SAVE METRICS
+        # SAVE MODEL ONLY FINAL ROUND
         # -------------------------
-        if rnd == self.num_rounds:
+        if rnd == 30:
 
-            print("📊 Saving final metrics...")
+            model = TrafficPredictor(
+                input_size=1,
+                hidden_size=128,
+                num_layers=3,
+                output_size=1
+            )
+
+            weights_list = parameters_to_ndarrays(
+                aggregated_parameters
+            )
+
+            state_dict = model.state_dict()
+
+            for i, key in enumerate(state_dict.keys()):
+
+                state_dict[key] = torch.tensor(
+                    weights_list[i]
+                ).float()
+
+            model.load_state_dict(state_dict)
+
+            torch.save(
+                model.state_dict(),
+                f"{RESULT_DIR}/model_alpha_{ALPHA}.pth"
+            )
+
+            print(
+                f"✅ Model saved for alpha={ALPHA}"
+            )
+
+        return aggregated_parameters, {}
+
+    # -------------------------
+    # AGGREGATE EVALUATE
+    # -------------------------
+    def aggregate_evaluate(
+        self,
+        rnd,
+        results,
+        failures
+    ):
+
+        if len(results) == 0:
+
+            print("❌ No evaluation results received")
+
+            return 0.0, {}
+
+        total_loss = 0
+        total_examples = 0
+
+        for idx, (client_proxy, eval_res) in enumerate(results):
+
+            num_examples = eval_res.num_examples
+
+            total_loss += (
+                eval_res.loss * num_examples
+            )
+
+            total_examples += num_examples
+
+            # =========================
+            # CLIENT NAME
+            # =========================
+            client_name = eval_res.metrics.get(
+                "client_name",
+                f"client_{idx+1}"
+            )
+
+            # =========================
+            # INIT STORAGE
+            # =========================
+            if client_name not in client_metrics:
+
+                client_metrics[client_name] = {
+                    "MAE": [],
+                    "RMSE": [],
+                    "NRMSE": []
+                }
+
+            # =========================
+            # READ METRICS
+            # =========================
+            mae = float(
+                eval_res.metrics.get(
+                    "mae",
+                    0.0
+                )
+            )
+
+            rmse = float(
+                eval_res.metrics.get(
+                    "rmse",
+                    0.0
+                )
+            )
+
+            nrmse = float(
+                eval_res.metrics.get(
+                    "nrmse",
+                    rmse
+                )
+            )
+
+            # =========================
+            # STORE
+            # =========================
+            client_metrics[client_name]["MAE"].append(
+                mae
+            )
+
+            client_metrics[client_name]["RMSE"].append(
+                rmse
+            )
+
+            client_metrics[client_name]["NRMSE"].append(
+                nrmse
+            )
+
+            print(
+                f"{client_name} -> "
+                f"MAE={mae:.6f}, "
+                f"RMSE={rmse:.6f}"
+            )
+
+        avg_loss = total_loss / total_examples
+
+        print(
+            f"📊 Round {rnd} Evaluation Loss: "
+            f"{avg_loss:.6f}"
+        )
+
+        # =========================
+        # FINAL ROUND SAVE
+        # =========================
+        if rnd == 30:
+
+            print("\n📁 Saving final metrics...")
 
             final_results = {}
 
-            for cname in client_metrics:
+            for client_name in client_metrics:
 
-                # average loss → approximate evaluation
-                avg_loss = np.mean(client_metrics[cname]["loss"])
+                final_results[client_name] = {
 
-                final_results[cname] = {
-                    "MAE": float(avg_loss),
-                    "RMSE": float(np.sqrt(avg_loss)),
-                    "NRMSE": float(np.sqrt(avg_loss))
+                    "MAE": float(
+                        np.mean(
+                            client_metrics[client_name]["MAE"]
+                        )
+                    ),
+
+                    "RMSE": float(
+                        np.mean(
+                            client_metrics[client_name]["RMSE"]
+                        )
+                    ),
+
+                    "NRMSE": float(
+                        np.mean(
+                            client_metrics[client_name]["NRMSE"]
+                        )
+                    )
                 }
 
-            with open(f"{RESULT_DIR}/metrics_alpha_{ALPHA}.json", "w") as f:
-                json.dump(final_results, f, indent=4)
+            with open(
+                f"{RESULT_DIR}/metrics_alpha_{ALPHA}.json",
+                "w"
+            ) as f:
 
-            print(f"✅ Results saved in {RESULT_DIR}")
+                json.dump(
+                    final_results,
+                    f,
+                    indent=4
+                )
 
-        return aggregated_parameters, {}
+            print(
+                f"✅ Metrics saved for alpha={ALPHA}"
+            )
+
+        return avg_loss, {
+            "loss": avg_loss
+        }
+
 
 # =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
 
-    base_model = TrafficPredictor(input_size=1, hidden_size=128, num_layers=3, output_size=1)
+    # -------------------------
+    # INITIAL MODEL
+    # -------------------------
+    base_model = TrafficPredictor(
+        input_size=1,
+        hidden_size=128,
+        num_layers=3,
+        output_size=1
+    )
 
-    initial_ndarrays = [v.cpu().detach().numpy() for v in base_model.state_dict().values()]
-    initial_parameters = ndarrays_to_parameters(initial_ndarrays)
+    initial_ndarrays = [
 
+        v.cpu().detach().numpy()
+
+        for v in base_model.state_dict().values()
+    ]
+
+    initial_parameters = ndarrays_to_parameters(
+        initial_ndarrays
+    )
+
+    # -------------------------
+    # STRATEGY
+    # -------------------------
     strategy = FedCustom(
+
         fraction_fit=1.0,
         min_fit_clients=3,
         min_available_clients=3,
+
+        fraction_evaluate=1.0,
+        min_evaluate_clients=3,
+
         initial_parameters=initial_parameters,
-        on_fit_config_fn=lambda rnd: {"round": rnd},
+
+        on_fit_config_fn=lambda rnd: {
+            "round": rnd
+        }
     )
 
-    strategy.num_rounds = 30   # ⚠️ IMPORTANT (match your training)
-
-    print("🚀 Starting FedAvg Server...")
+    print(
+        f"\n🚀 Starting FedAvg Server "
+        f"for alpha={ALPHA}"
+    )
 
     fl.server.start_server(
+
         server_address="localhost:8080",
-        config=fl.server.ServerConfig(num_rounds=30),
+
+        config=fl.server.ServerConfig(
+            num_rounds=30
+        ),
+
         strategy=strategy,
     )

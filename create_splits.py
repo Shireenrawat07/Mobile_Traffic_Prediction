@@ -6,7 +6,7 @@ from utils.data_preprocess import load_real_traffic_data, prepare_sequences
 
 SEQ_LEN = 10
 NUM_CLIENTS = 3
-ALPHA = 0.5 # change to 0.1 / 0.5 / 1.0
+ALPHA = 0.05 # change to 0.1 / 0.5 / 1.0
 
 DATA_FILES = [
     "Dataset/ElBorn.csv",

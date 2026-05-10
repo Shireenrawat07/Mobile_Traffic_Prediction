@@ -4,8 +4,8 @@ import pandas as pd
 
 # Folders for each algorithm
 folders = {
-    'FedAvg': 'fedavg_results',
-    'FedProx': 'fedprox_results'
+    'FedAvg': 'results/fedavg_results',
+    'FedProx': 'results/fedprox_results'
 }
 
 rows = []
@@ -36,5 +36,5 @@ for algo, folder in folders.items():
 
 # Convert to DataFrame and save CSV
 df_results = pd.DataFrame(rows)
-df_results.to_csv('results_fedprox_fedavg.csv', index=False)
+df_results.to_csv('results/results_fedprox_fedavg.csv', index=False)
 print("CSV file 'results_fedprox_fedavg.csv' created successfully!")

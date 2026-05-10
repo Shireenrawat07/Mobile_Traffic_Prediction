@@ -4,8 +4,8 @@ import pandas as pd
 
 # Folders
 folders = {
-    'FedAvg': 'fedavg_results',
-    'FedNova': 'fednova_results'
+    'FedAvg': 'results/fedavg_results',
+    'FedNova': 'results/fednova_results'
 }
 
 rows = []
@@ -34,5 +34,5 @@ for algo, folder in folders.items():
 
 # Save CSV
 df_results = pd.DataFrame(rows)
-df_results.to_csv('results_fedavg_fednova.csv', index=False)
+df_results.to_csv('results/results_fedavg_fednova.csv', index=False)
 print("CSV file 'results_fedavg_fednova.csv' created successfully!")

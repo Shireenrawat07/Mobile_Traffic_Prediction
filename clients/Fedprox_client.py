@@ -1,55 +1,259 @@
-import copy
+import sys
+import os
+
+ROOT = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        ".."
+    )
+)
+
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
+
+import flwr as fl
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 
-class FedProxClient:
-    def __init__(self, model, trainloader, testloader, device='cpu', mu=0.001, epochs=1, lr=1e-4):
-        self.model = model
-        self.trainloader = trainloader
-        self.testloader = testloader
-        self.device = device
-        self.mu = mu
-        self.epochs = epochs
-        self.lr = lr
-        self.global_weights = copy.deepcopy(model.state_dict())
+from torch.utils.data import (
+    TensorDataset,
+    DataLoader
+)
 
-    def fit(self):
-        """Train locally and return updated weights + average loss"""
+from models.lstm_model import TrafficPredictor
+
+
+# =========================
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available()
+    else "cpu"
+)
+
+LR = 0.001
+LOCAL_EPOCHS = 3
+BATCH_SIZE = 64
+MU = 0.001   # FedProx parameter
+
+
+# =========================
+def load_data(client_id, alpha):
+
+    path = f"splits_alpha_{alpha}/client_{client_id}.pt"
+
+    data = torch.load(path, weights_only=False)
+
+    X = data["X"]
+    y = data["y"]
+
+    split = int(0.8 * len(X))
+
+    train_x = X[:split]
+    train_y = y[:split]
+
+    val_x = X[split:]
+    val_y = y[split:]
+
+    train_loader = DataLoader(
+        TensorDataset(
+            torch.tensor(train_x).float(),
+            torch.tensor(train_y).float()
+        ),
+        batch_size=BATCH_SIZE,
+        shuffle=True
+    )
+
+    val_loader = DataLoader(
+        TensorDataset(
+            torch.tensor(val_x).float(),
+            torch.tensor(val_y).float()
+        ),
+        batch_size=BATCH_SIZE,
+        shuffle=False
+    )
+
+    return train_loader, val_loader
+
+
+# =========================
+class FedProxClient(fl.client.NumPyClient):
+
+    def __init__(self, cid, alpha):
+
+        self.cid = cid
+        self.alpha = alpha
+
+        self.model = TrafficPredictor(
+            input_size=1,
+            hidden_size=128,
+            num_layers=3,
+            output_size=1
+        ).to(DEVICE)
+
+        self.train_loader, self.val_loader = load_data(cid, alpha)
+
+        self.loss_fn = nn.MSELoss()
+
+    # =========================
+    def get_parameters(self, config=None):
+
+        return [
+            val.cpu().numpy()
+            for _, val in self.model.state_dict().items()
+        ]
+
+    # =========================
+    def fit(self, parameters, config):
+
+        # load global model
+        state_dict = self.model.state_dict()
+
+        for i, key in enumerate(state_dict.keys()):
+            state_dict[key] = torch.tensor(
+                parameters[i]
+            ).to(DEVICE)
+
+        self.model.load_state_dict(state_dict)
+
+        # save global params for proximal term
+        global_params = [
+            p.clone().detach()
+            for p in self.model.parameters()
+        ]
+
+        optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=LR
+        )
+
         self.model.train()
-        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
-        loss_fn = nn.MSELoss()
-        total_loss = 0.0
-        n_samples = max(len(self.trainloader.dataset), 1)
 
-        for _ in range(self.epochs):
-            for X_batch, y_batch in self.trainloader:
-                X_batch = X_batch.to(self.device).float()
-                y_batch = y_batch.to(self.device).float()
+        total_loss = 0
+        total_samples = 0
+
+        # =========================
+        # LOCAL TRAINING (FedProx)
+        # =========================
+        for _ in range(LOCAL_EPOCHS):
+
+            for x, y in self.train_loader:
+
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
 
                 optimizer.zero_grad()
-                outputs = self.model(X_batch)
-                loss = loss_fn(outputs, y_batch)
 
-                # FedProx proximal term
-                prox_loss = 0.0
-                for w, w0 in zip(self.model.parameters(), self.global_weights.values()):
-                    prox_loss += ((w - w0.to(self.device))**2).sum()
-                loss += (self.mu / 2) * prox_loss
+                out = self.model(x)
 
-                # Check NaN
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print("Warning: loss became NaN, skipping batch")
-                    continue
+                mse_loss = self.loss_fn(
+                    out.squeeze(),
+                    y.squeeze()
+                )
+
+                # =========================
+                # PROXIMAL TERM
+                # =========================
+                prox_term = 0.0
+
+                for w, w0 in zip(
+                    self.model.parameters(),
+                    global_params
+                ):
+                    prox_term += torch.sum((w - w0) ** 2)
+
+                loss = mse_loss + (MU / 2) * prox_term
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.05)  # smaller clip
+
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=5.0
+                )
+
                 optimizer.step()
-                total_loss += loss.item() * X_batch.size(0)
 
-        avg_loss = total_loss / n_samples
-        return copy.deepcopy(self.model.state_dict()), avg_loss
+                total_loss += loss.item() * x.size(0)
+                total_samples += x.size(0)
 
-    def set_weights(self, state_dict):
+        avg_loss = total_loss / total_samples
+
+        return (
+            self.get_parameters(),
+            total_samples,
+            {
+                "loss": float(avg_loss),
+                "client_name": f"Client_{self.cid}"
+            }
+        )
+
+    # =========================
+    def evaluate(self, parameters, config):
+
+        state_dict = self.model.state_dict()
+
+        for i, key in enumerate(state_dict.keys()):
+            state_dict[key] = torch.tensor(
+                parameters[i]
+            ).to(DEVICE)
+
         self.model.load_state_dict(state_dict)
-        self.global_weights = copy.deepcopy(state_dict)
+
+        self.model.eval()
+
+        preds = []
+        targets = []
+
+        total_loss = 0
+        total_samples = 0
+
+        with torch.no_grad():
+
+            for x, y in self.val_loader:
+
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
+
+                out = self.model(x)
+
+                preds.extend(out.cpu().numpy().reshape(-1))
+                targets.extend(y.cpu().numpy().reshape(-1))
+
+                loss = self.loss_fn(
+                    out.squeeze(),
+                    y.squeeze()
+                )
+
+                total_loss += loss.item() * x.size(0)
+                total_samples += x.size(0)
+
+        preds = np.array(preds)
+        targets = np.array(targets)
+
+        rmse = np.sqrt(np.mean((preds - targets) ** 2))
+        mae = np.mean(np.abs(preds - targets))
+
+        avg_loss = total_loss / total_samples
+
+        return (
+            float(avg_loss),
+            total_samples,
+            {
+                "rmse": float(rmse),
+                "mae": float(mae)
+            }
+        )
+
+
+# =========================
+if __name__ == "__main__":
+
+    cid = sys.argv[1]
+    alpha = float(sys.argv[2])
+
+    client = FedProxClient(cid, alpha)
+
+    fl.client.start_numpy_client(
+        server_address="localhost:8080",
+        client=client
+    )
