@@ -1,3 +1,5 @@
+# fednova_server.py (FINAL FIXED + UNIFIED LOGGING)
+
 import flwr as fl
 import numpy as np
 import torch
@@ -6,267 +8,243 @@ import os
 import json
 import sys
 
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
+import os
+import sys
+
+ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
+from models.lstm_model import TrafficPredictor
+
 
 class FedNovaStrategy(fl.server.strategy.FedAvg):
 
-    def __init__(
-        self,
-        split_value=0.1,
-        total_rounds=30,
-        *args,
-        **kwargs
-    ):
+    def __init__(self, split_value=0.1, total_rounds=30, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.split_value = split_value
         self.total_rounds = total_rounds
 
-        self.round_data = []
+        # ===== UNIFIED LOGGING STORAGE =====
         self.all_data = []
-
-        self.global_weights = None
+        self.round_buffer = []
         self.final_client_metrics = {}
+        self.global_weights = None
 
     # =========================
-    # AGGREGATE FIT
+    # FIT AGGREGATION (UNCHANGED LOGIC)
     # =========================
     def aggregate_fit(self, rnd, results, failures):
 
         if not results:
             return None, {}
 
-        weights_list = []
-        taus = []
-        sizes = []
-        client_names = []
-        losses = []
+        weights_list, taus, sizes, names, losses = [], [], [], [], []
 
         for client, fit_res in results:
 
-            weights = fl.common.parameters_to_ndarrays(
-                fit_res.parameters
+            weights_list.append(
+                parameters_to_ndarrays(fit_res.parameters)
             )
 
-            tau = fit_res.metrics.get("tau", 1.0)
-            loss = fit_res.metrics.get("loss", 1.0)
-            n_k = fit_res.num_examples
+            taus.append(float(fit_res.metrics.get("tau", 1.0)))
+            losses.append(float(fit_res.metrics.get("loss", 0.0)))
+            sizes.append(fit_res.num_examples)
 
-            client_name = fit_res.metrics.get(
-                "client_name",
-                client.cid
+            names.append(
+                fit_res.metrics.get("client_name", f"Client_{client.cid}")
             )
-
-            weights_list.append(weights)
-            taus.append(tau)
-            sizes.append(n_k)
-            client_names.append(client_name)
-            losses.append(loss)
 
         total_samples = sum(sizes)
 
+        if self.global_weights is None:
+            self.global_weights = [w.copy() for w in weights_list[0]]
+
+        aggregated_delta = [
+            np.zeros_like(w) for w in self.global_weights
+        ]
+
+        # ===== FEDNOVA CORE =====
+        for i, local_w in enumerate(weights_list):
+
+            delta = [
+                gw - lw
+                for gw, lw in zip(self.global_weights, local_w)
+            ]
+
+            normalized_delta = [
+                d / (taus[i] + 1e-8) for d in delta
+            ]
+
+            weight = sizes[i] / (total_samples + 1e-8)
+
+            aggregated_delta = [
+                ad + weight * nd
+                for ad, nd in zip(aggregated_delta, normalized_delta)
+            ]
+
+        new_global = [
+            gw - ad
+            for gw, ad in zip(self.global_weights, aggregated_delta)
+        ]
+
+        self.global_weights = new_global
+
         # =========================
-        # FEDNOVA AGGREGATION
+        # ROUND BUFFER (FIXED STRUCTURE)
         # =========================
-        aggregated = None
+        self.round_buffer = []
 
-        for i, weights in enumerate(weights_list):
+        for i in range(len(names)):
 
-            alpha = sizes[i] / (total_samples * taus[i])
-
-            if aggregated is None:
-                aggregated = [w * alpha for w in weights]
-            else:
-                aggregated = [
-                    a + w * alpha
-                    for a, w in zip(aggregated, weights)
-                ]
-
-        self.global_weights = aggregated
-
-        # =========================
-        # STORE ROUND DATA
-        # =========================
-        self.round_data = []
-
-        for i in range(len(client_names)):
-
-            self.round_data.append([
-                self.split_value,
-                client_names[i],
-                losses[i],
-                taus[i],
-                sizes[i],
-                None,
-                None,
-                None
+            self.round_buffer.append([
+                self.split_value,   # Alpha
+                rnd,                # Round ✔ FIXED
+                names[i],          # Client
+                losses[i],         # Loss
+                sizes[i],          # Samples
+                None,              # RMSE
+                None,              # MAE
+                None,              # NRMSE
+                "FedNova"          # Algorithm ✔ FIXED
             ])
 
-        return (
-            fl.common.ndarrays_to_parameters(aggregated),
-            {}
-        )
+        return ndarrays_to_parameters(new_global), {}
 
     # =========================
-    # AGGREGATE EVALUATE
+    # EVALUATION (STANDARDIZED)
     # =========================
     def aggregate_evaluate(self, rnd, results, failures):
 
-        total_loss = 0
-        total_rmse = 0
+        if not results:
+            return 0.0, {}
+
+        total_loss = 0.0
         total_n = 0
 
-        for client, res in results:
+        print(f"\n--- Round {rnd} Evaluation ---")
+
+        for i, (_, res) in enumerate(results):
 
             n = res.num_examples
-            loss = res.loss
-            rmse = res.metrics.get("rmse", 0)
-
-            total_loss += loss * n
-            total_rmse += rmse * n
+            total_loss += res.loss * n
             total_n += n
 
-        avg_loss = total_loss / total_n
-        avg_rmse = total_rmse / total_n
+            rmse = float(res.metrics.get("rmse", 0.0))
+            mae = float(res.metrics.get("mae", 0.0))
+            nrmse = float(res.metrics.get("nrmse", rmse))
+            client_name = res.metrics.get("client_name", f"Client_{i+1}")
 
-        print(f"Round {rnd}: RMSE={avg_rmse:.6f}")
+            print(f"{client_name} -> RMSE={rmse:.6f}, MAE={mae:.6f}")
 
-        # =========================
-        # STORE METRICS
-        # =========================
-        for i, (client, res) in enumerate(results):
+            # =========================
+            # UPDATE ROUND BUFFER
+            # =========================
+            if i < len(self.round_buffer):
+                self.round_buffer[i][5] = rmse
+                self.round_buffer[i][6] = mae
+                self.round_buffer[i][7] = nrmse
 
-            rmse = res.metrics.get("rmse", 0)
-            mae = res.metrics.get("mae", 0)
+                self.all_data.append(self.round_buffer[i])
 
-            self.round_data[i][5] = res.loss
-            self.round_data[i][6] = rmse
-            self.round_data[i][7] = mae
-
-            self.all_data.append(self.round_data[i])
-
+            # =========================
+            # FINAL ROUND JSON
+            # =========================
             if rnd == self.total_rounds:
-
-                client_name = self.round_data[i][1]
-                client_id = int(client_name.replace("Client_", ""))
-
-                self.final_client_metrics[f"client_{client_id}"] = {
-                    "MAE": float(mae),
-                    "RMSE": float(rmse),
-                    "NRMSE": float(rmse)
+                self.final_client_metrics[client_name] = {
+                    "MAE": mae,
+                    "RMSE": rmse,
+                    "NRMSE": nrmse
                 }
 
+        avg_loss = total_loss / (total_n + 1e-8)
+
+        print(f"Round {rnd} Loss: {avg_loss:.6f}")
+
         # =========================
-        # SAVE RESULTS (FIXED ONLY HERE)
+        # SAVE FINAL OUTPUTS
         # =========================
         if rnd == self.total_rounds:
 
-            os.makedirs("results/fednova_results", exist_ok=True)
-
+            # ---------- CSV (UNIFIED FORMAT) ----------
             df = pd.DataFrame(
                 self.all_data,
                 columns=[
-                    "split",
-                    "client_name",
-                    "loss",
-                    "tau",
-                    "samples",
-                    "global_loss",
-                    "rmse",
-                    "mae"
+                    "Alpha",
+                    "Round",
+                    "Client",
+                    "Loss",
+                    "Samples",
+                    "RMSE",
+                    "MAE",
+                    "NRMSE",
+                    "Algorithm"
                 ]
             )
 
-            df_client = (
-                df.groupby(["split", "client_name"])
-                .mean()
-                .reset_index()
-            )
+            csv_path = "results/fednova_results/FedNova_ClientWise.csv"
+            df.to_csv(csv_path, index=False)
 
-            df_client.columns = [
-                "Split",
-                "Client",
-                "Loss",
-                "Tau",
-                "Samples",
-                "Global_Loss",
-                "RMSE",
-                "MAE"
-            ]
+            # ---------- JSON ----------
+            json_path = f"results/fednova_results/metrics_alpha_{self.split_value}.json"
 
-            df_client["Client"] = (
-                df_client["Client"]
-                .str.replace("Client_", "")
-                .astype(int)
-            )
-
-            df_client["Algorithm"] = "FedNova"
-            df_client["NRMSE"] = df_client["RMSE"]
-
-            # =========================
-            # ONLY FIX: SAFE APPEND CSV
-            # =========================
-            df_client["Alpha"] = self.split_value
-
-            file_path = "results/fednova_results/FedNova_ClientWise.csv"
-            file_exists = os.path.isfile(file_path)
-
-            df_client.to_csv(
-                file_path,
-                mode="a",
-                header=not file_exists,
-                index=False
-            )
-
-            # =========================
-            # JSON SAVE
-            # =========================
-            with open(
-                f"results/fednova_results/metrics_alpha_{self.split_value}.json",
-                "w"
-            ) as f:
+            with open(json_path, "w") as f:
                 json.dump(self.final_client_metrics, f, indent=4)
 
-            # =========================
-            # MODEL SAVE
-            # =========================
-            model_weights = {
-                f"layer_{i}": torch.tensor(w)
-                for i, w in enumerate(self.global_weights)
-            }
+            print(f"\n✅ FedNova results saved for alpha={self.split_value}")
 
-            torch.save(
-                model_weights,
-                f"results/fednova_results/model_alpha_{self.split_value}.pth"
-            )
-
-            print(f"Saved results for alpha={self.split_value}")
-
-        return avg_loss, {"rmse": avg_rmse}
-
-
-# =========================
+        return avg_loss, {"rmse": float(np.sqrt(avg_loss))}
+        # =========================
 # MAIN
 # =========================
 def main():
 
-    split_value = float(sys.argv[1])
+    if len(sys.argv) < 2:
+        print("Usage: python Fednova_server.py <alpha>")
+        sys.exit(1)
+
+    alpha = float(sys.argv[1])
+
+    # create result folders
+    os.makedirs("results/fednova_results", exist_ok=True)
+
+    # initial model
+    base_model = TrafficPredictor(
+        input_size=1,
+        hidden_size=128,
+        num_layers=3,
+        output_size=1
+    )
+
+    initial_parameters = ndarrays_to_parameters([
+        v.cpu().detach().numpy()
+        for v in base_model.state_dict().values()
+    ])
 
     strategy = FedNovaStrategy(
-        split_value=split_value,
+        split_value=alpha,
         total_rounds=30,
+
         fraction_fit=1.0,
         min_fit_clients=3,
         min_available_clients=3,
+
         fraction_evaluate=1.0,
-        min_evaluate_clients=3
+        min_evaluate_clients=3,
+
+        initial_parameters=initial_parameters
     )
 
-    print(f"FedNova server started for alpha={split_value}")
+    print(f"\nStarting FedNova Server for alpha={alpha}")
 
     fl.server.start_server(
         server_address="0.0.0.0:8080",
-        strategy=strategy,
-        config=fl.server.ServerConfig(num_rounds=30)
+        config=fl.server.ServerConfig(num_rounds=30),
+        strategy=strategy
     )
 
 

@@ -1,119 +1,65 @@
-# fl_server.py
-
 import os
 import sys
 import json
+import numpy as np
+import torch
+import flwr as fl
+import pandas as pd
 
-ROOT = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        ".."
-    )
-)
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 
+# =========================
+# PROJECT PATH
+# =========================
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.append(ROOT)
 
-import flwr as fl
-import numpy as np
-import torch
-
-from flwr.common import (
-    parameters_to_ndarrays,
-    ndarrays_to_parameters
-)
-
 from models.lstm_model import TrafficPredictor
 
+
 # =========================
-# ALPHA FROM TERMINAL
+# CONFIG
 # =========================
 if len(sys.argv) < 2:
-
     print("Usage: python fl_server.py <alpha>")
     sys.exit(1)
 
-ALPHA = sys.argv[1]
+ALPHA = float(sys.argv[1])
 
-# =========================
-# RESULT DIRECTORY
-# =========================
 RESULT_DIR = "results/fedavg_results"
-
-os.makedirs(
-    RESULT_DIR,
-    exist_ok=True
-)
-
-# =========================
-# CLIENT METRICS STORAGE
-# =========================
-client_metrics = {}
-
-# =========================
-# VALIDATE WEIGHTS
-# =========================
-def validate_weights(client_weights):
-
-    for arr in client_weights:
-
-        arr = np.array(
-            arr,
-            dtype=np.float32
-        )
-
-        if np.isnan(arr).any() or np.isinf(arr).any():
-            return False
-
-    return True
+os.makedirs(RESULT_DIR, exist_ok=True)
 
 
 # =========================
-# CUSTOM FEDAVG
+# FEDAVG STRATEGY
 # =========================
 class FedCustom(fl.server.strategy.FedAvg):
 
-    # -------------------------
-    # AGGREGATE FIT
-    # -------------------------
-    def aggregate_fit(
-        self,
-        rnd,
-        results,
-        failures
-    ):
+    def __init__(self, alpha=0.1, total_rounds=30, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        valid_results = []
+        self.alpha = alpha
+        self.total_rounds = total_rounds
 
-        for client_proxy, fit_res in results:
+        # unified storage
+        self.all_data = []
+        self.final_metrics = {}
 
-            weights = parameters_to_ndarrays(
-                fit_res.parameters
-            )
+    # =========================
+    # FIT
+    # =========================
+    def aggregate_fit(self, rnd, results, failures):
 
-            if validate_weights(weights):
-
-                valid_results.append(
-                    (client_proxy, fit_res)
-                )
-
-        if len(valid_results) == 0:
+        if not results:
             return None, {}
 
-        aggregated_parameters, _ = super().aggregate_fit(
-            rnd,
-            valid_results,
-            failures
-        )
+        aggregated, _ = super().aggregate_fit(rnd, results, failures)
 
-        print(
-            f"\n✅ Round {rnd} aggregation complete"
-        )
+        print(f"\nRound {rnd} aggregation complete")
 
-        # -------------------------
-        # SAVE MODEL ONLY FINAL ROUND
-        # -------------------------
-        if rnd == 30:
+        # save model final round
+        if rnd == self.total_rounds:
 
             model = TrafficPredictor(
                 input_size=1,
@@ -122,191 +68,110 @@ class FedCustom(fl.server.strategy.FedAvg):
                 output_size=1
             )
 
-            weights_list = parameters_to_ndarrays(
-                aggregated_parameters
-            )
+            weights = parameters_to_ndarrays(aggregated)
+            state = model.state_dict()
 
-            state_dict = model.state_dict()
+            for i, key in enumerate(state.keys()):
+                state[key] = torch.tensor(weights[i]).float()
 
-            for i, key in enumerate(state_dict.keys()):
-
-                state_dict[key] = torch.tensor(
-                    weights_list[i]
-                ).float()
-
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state)
 
             torch.save(
                 model.state_dict(),
-                f"{RESULT_DIR}/model_alpha_{ALPHA}.pth"
+                f"{RESULT_DIR}/model_alpha_{self.alpha}.pth"
             )
 
-            print(
-                f"✅ Model saved for alpha={ALPHA}"
-            )
+            print(f"Model saved for alpha={self.alpha}")
 
-        return aggregated_parameters, {}
+        return aggregated, {}
 
-    # -------------------------
-    # AGGREGATE EVALUATE
-    # -------------------------
-    def aggregate_evaluate(
-        self,
-        rnd,
-        results,
-        failures
-    ):
+    # =========================
+    # EVALUATION + LOGGING
+    # =========================
+    def aggregate_evaluate(self, rnd, results, failures):
 
-        if len(results) == 0:
-
-            print("❌ No evaluation results received")
-
+        if not results:
             return 0.0, {}
 
-        total_loss = 0
-        total_examples = 0
+        total_loss = 0.0
+        total_n = 0
 
-        for idx, (client_proxy, eval_res) in enumerate(results):
+        print(f"\n--- Round {rnd} Evaluation ---")
 
-            num_examples = eval_res.num_examples
+        for idx, (_, res) in enumerate(results):
 
-            total_loss += (
-                eval_res.loss * num_examples
-            )
+            n = res.num_examples
+            total_loss += res.loss * n
+            total_n += n
 
-            total_examples += num_examples
+            m = res.metrics
+
+            client_name = m.get("client_name", f"client_{idx+1}")
+            mae = float(m.get("mae", 0.0))
+            rmse = float(m.get("rmse", 0.0))
+            nrmse = float(m.get("nrmse", rmse))
+
+            print(f"{client_name} -> MAE={mae:.6f}, RMSE={rmse:.6f}")
 
             # =========================
-            # CLIENT NAME
+            # CLEAN LOG FORMAT (IMPORTANT)
             # =========================
-            client_name = eval_res.metrics.get(
-                "client_name",
-                f"client_{idx+1}"
-            )
+            self.all_data.append([
+                self.alpha,      # alpha (heterogeneity)
+                client_name,
+                float(res.loss),
+                mae,
+                rmse,
+                nrmse,
+                "FedAvg",
+                rnd
+            ])
 
-            # =========================
-            # INIT STORAGE
-            # =========================
-            if client_name not in client_metrics:
-
-                client_metrics[client_name] = {
-                    "MAE": [],
-                    "RMSE": [],
-                    "NRMSE": []
+            # final metrics
+            if rnd == self.total_rounds:
+                self.final_metrics[client_name] = {
+                    "MAE": mae,
+                    "RMSE": rmse,
+                    "NRMSE": nrmse
                 }
 
-            # =========================
-            # READ METRICS
-            # =========================
-            mae = float(
-                eval_res.metrics.get(
-                    "mae",
-                    0.0
-                )
-            )
+        avg_loss = total_loss / (total_n + 1e-8)
 
-            rmse = float(
-                eval_res.metrics.get(
-                    "rmse",
-                    0.0
-                )
-            )
-
-            nrmse = float(
-                eval_res.metrics.get(
-                    "nrmse",
-                    rmse
-                )
-            )
-
-            # =========================
-            # STORE
-            # =========================
-            client_metrics[client_name]["MAE"].append(
-                mae
-            )
-
-            client_metrics[client_name]["RMSE"].append(
-                rmse
-            )
-
-            client_metrics[client_name]["NRMSE"].append(
-                nrmse
-            )
-
-            print(
-                f"{client_name} -> "
-                f"MAE={mae:.6f}, "
-                f"RMSE={rmse:.6f}"
-            )
-
-        avg_loss = total_loss / total_examples
-
-        print(
-            f"📊 Round {rnd} Evaluation Loss: "
-            f"{avg_loss:.6f}"
-        )
+        print(f"Round {rnd} Loss: {avg_loss:.6f}")
 
         # =========================
-        # FINAL ROUND SAVE
+        # SAVE FINAL RESULTS
         # =========================
-        if rnd == 30:
+        if rnd == self.total_rounds:
 
-            print("\n📁 Saving final metrics...")
+            df = pd.DataFrame(self.all_data, columns=[
+                "alpha",
+                "client",
+                "loss",
+                "mae",
+                "rmse",
+                "nrmse",
+                "algorithm",
+                "round"
+            ])
 
-            final_results = {}
+            csv_path = f"{RESULT_DIR}/FedAvg_clientwise.csv"
+            df.to_csv(csv_path, index=False)
 
-            for client_name in client_metrics:
+            json_path = f"{RESULT_DIR}/metrics_alpha_{self.alpha}.json"
+            with open(json_path, "w") as f:
+                json.dump(self.final_metrics, f, indent=4)
 
-                final_results[client_name] = {
+            print(f"Saved CSV + JSON for alpha={self.alpha}")
 
-                    "MAE": float(
-                        np.mean(
-                            client_metrics[client_name]["MAE"]
-                        )
-                    ),
-
-                    "RMSE": float(
-                        np.mean(
-                            client_metrics[client_name]["RMSE"]
-                        )
-                    ),
-
-                    "NRMSE": float(
-                        np.mean(
-                            client_metrics[client_name]["NRMSE"]
-                        )
-                    )
-                }
-
-            with open(
-                f"{RESULT_DIR}/metrics_alpha_{ALPHA}.json",
-                "w"
-            ) as f:
-
-                json.dump(
-                    final_results,
-                    f,
-                    indent=4
-                )
-
-            print(
-                f"✅ Metrics saved for alpha={ALPHA}"
-            )
-
-        return avg_loss, {
-            "loss": avg_loss
-        }
+        return avg_loss, {"loss": float(avg_loss)}
 
 
 # =========================
 # MAIN
 # =========================
-if __name__ == "__main__":
+def main():
 
-    # -------------------------
-    # INITIAL MODEL
-    # -------------------------
     base_model = TrafficPredictor(
         input_size=1,
         hidden_size=128,
@@ -314,48 +179,30 @@ if __name__ == "__main__":
         output_size=1
     )
 
-    initial_ndarrays = [
-
+    initial_parameters = ndarrays_to_parameters([
         v.cpu().detach().numpy()
-
         for v in base_model.state_dict().values()
-    ]
+    ])
 
-    initial_parameters = ndarrays_to_parameters(
-        initial_ndarrays
-    )
-
-    # -------------------------
-    # STRATEGY
-    # -------------------------
     strategy = FedCustom(
-
+        alpha=ALPHA,
+        total_rounds=30,
         fraction_fit=1.0,
         min_fit_clients=3,
         min_available_clients=3,
-
         fraction_evaluate=1.0,
         min_evaluate_clients=3,
-
-        initial_parameters=initial_parameters,
-
-        on_fit_config_fn=lambda rnd: {
-            "round": rnd
-        }
+        initial_parameters=initial_parameters
     )
 
-    print(
-        f"\n🚀 Starting FedAvg Server "
-        f"for alpha={ALPHA}"
-    )
+    print(f"\nStarting FedAvg Server for alpha={ALPHA}")
 
     fl.server.start_server(
-
         server_address="localhost:8080",
-
-        config=fl.server.ServerConfig(
-            num_rounds=30
-        ),
-
+        config=fl.server.ServerConfig(num_rounds=30),
         strategy=strategy,
     )
+
+
+if __name__ == "__main__":
+    main()

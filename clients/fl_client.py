@@ -1,70 +1,46 @@
-# fl_client.py
-
 import sys
 import os
-
-ROOT = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        ".."
-    )
-)
-
-if ROOT not in sys.path:
-    sys.path.append(ROOT)
-
 import flwr as fl
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
-from torch.utils.data import (
-    TensorDataset,
-    DataLoader
-)
+from torch.utils.data import TensorDataset, DataLoader
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.append(ROOT)
 
 from models.lstm_model import TrafficPredictor
+
 
 # =========================
 # DEVICE
 # =========================
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available()
-    else "cpu"
-)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LR = 0.001
 LOCAL_EPOCHS = 3
 BATCH_SIZE = 64
 
+
 # =========================
-# LOAD DATA
+# DATA LOADER
 # =========================
 def load_data(client_id, alpha):
 
-    path = f"splits_alpha_{alpha}/client_{client_id}.pt"
+    path = f"Alpha_Splits/splits_alpha_{alpha}/client_{client_id}.pt"
+    data = torch.load(path, weights_only=False)
 
-    data = torch.load(
-        path,
-        weights_only=False
-    )
-
-    X = data["X"]
-    y = data["y"]
+    X, y = data["X"], data["y"]
 
     split = int(0.8 * len(X))
 
-    train_x = X[:split]
-    train_y = y[:split]
-
-    val_x = X[split:]
-    val_y = y[split:]
-
     train_loader = DataLoader(
         TensorDataset(
-            torch.tensor(train_x).float(),
-            torch.tensor(train_y).float()
+            torch.tensor(X[:split]).float(),
+            torch.tensor(y[:split]).float()
         ),
         batch_size=BATCH_SIZE,
         shuffle=True
@@ -72,8 +48,8 @@ def load_data(client_id, alpha):
 
     val_loader = DataLoader(
         TensorDataset(
-            torch.tensor(val_x).float(),
-            torch.tensor(val_y).float()
+            torch.tensor(X[split:]).float(),
+            torch.tensor(y[split:]).float()
         ),
         batch_size=BATCH_SIZE,
         shuffle=False
@@ -99,66 +75,54 @@ class FedAvgClient(fl.client.NumPyClient):
             output_size=1
         ).to(DEVICE)
 
-        self.train_loader, self.val_loader = load_data(
-            cid,
-            alpha
-        )
+        self.train_loader, self.val_loader = load_data(cid, alpha)
 
         self.loss_fn = nn.MSELoss()
 
     # =========================
-    # GET PARAMETERS
-    # =========================
     def get_parameters(self, config=None):
-
         return [
-            val.cpu().numpy()
-            for _, val in self.model.state_dict().items()
+            v.cpu().detach().numpy()
+            for _, v in self.model.state_dict().items()
         ]
 
     # =========================
-    # FIT
-    # =========================
-    def fit(self, parameters, config):
+    def set_parameters(self, parameters):
 
         state_dict = self.model.state_dict()
 
         for i, key in enumerate(state_dict.keys()):
-
-            state_dict[key] = torch.tensor(
-                parameters[i]
-            ).to(DEVICE)
+            state_dict[key] = torch.tensor(parameters[i]).to(DEVICE)
 
         self.model.load_state_dict(state_dict)
 
-        optimizer = optim.Adam(
-            self.model.parameters(),
-            lr=LR
-        )
+    # =========================
+    # TRAINING
+    # =========================
+    def fit(self, parameters, config):
+
+        self.set_parameters(parameters)
+
+        optimizer = optim.Adam(self.model.parameters(), lr=LR)
 
         self.model.train()
 
-        total_loss = 0
+        total_loss = 0.0
         total_samples = 0
 
-        # =========================
-        # LOCAL TRAINING
-        # =========================
         for _ in range(LOCAL_EPOCHS):
-
             for x, y in self.train_loader:
 
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
+                x, y = x.to(DEVICE), y.to(DEVICE)
 
                 optimizer.zero_grad()
 
                 out = self.model(x)
 
-                loss = self.loss_fn(
-                    out.squeeze(),
-                    y.squeeze()
-                )
+                loss = self.loss_fn(out.squeeze(), y.squeeze())
+
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
 
                 loss.backward()
 
@@ -169,13 +133,10 @@ class FedAvgClient(fl.client.NumPyClient):
 
                 optimizer.step()
 
-                total_loss += (
-                    loss.item() * x.size(0)
-                )
-
+                total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
 
-        avg_loss = total_loss / total_samples
+        avg_loss = total_loss / (total_samples + 1e-8)
 
         return (
             self.get_parameters(),
@@ -187,85 +148,69 @@ class FedAvgClient(fl.client.NumPyClient):
         )
 
     # =========================
-    # EVALUATE
+    # STANDARDIZED EVALUATION (IMPORTANT)
     # =========================
     def evaluate(self, parameters, config):
 
-        state_dict = self.model.state_dict()
-
-        for i, key in enumerate(state_dict.keys()):
-
-            state_dict[key] = torch.tensor(
-                parameters[i]
-            ).to(DEVICE)
-
-        self.model.load_state_dict(state_dict)
+        self.set_parameters(parameters)
 
         self.model.eval()
 
-        preds = []
-        targets = []
+        preds, targets = [], []
 
-        total_loss = 0
+        total_loss = 0.0
         total_samples = 0
 
         with torch.no_grad():
 
             for x, y in self.val_loader:
 
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
+                x, y = x.to(DEVICE), y.to(DEVICE)
 
                 out = self.model(x)
 
-                preds.extend(
-                    out.cpu().numpy().reshape(-1)
-                )
+                loss = self.loss_fn(out.squeeze(), y.squeeze())
 
-                targets.extend(
-                    y.cpu().numpy().reshape(-1)
-                )
+                preds.extend(out.cpu().numpy().reshape(-1))
+                targets.extend(y.cpu().numpy().reshape(-1))
 
-                loss = self.loss_fn(
-                    out.squeeze(),
-                    y.squeeze()
-                )
-
-                total_loss += (
-                    loss.item() * x.size(0)
-                )
-
+                total_loss += loss.item() * x.size(0)
                 total_samples += x.size(0)
 
         preds = np.array(preds)
         targets = np.array(targets)
 
         # =========================
-        # METRICS
+        # METRICS (UNIFIED ACROSS ALL ALGORITHMS)
         # =========================
-        rmse = np.sqrt(
-            np.mean((preds - targets) ** 2)
-        )
+        mse = np.mean((preds - targets) ** 2)
+        rmse = np.sqrt(mse)
+        mae = np.mean(np.abs(preds - targets))
+        variance = np.var(preds)
 
-        mae = np.mean(
-            np.abs(preds - targets)
-        )
+        denom = np.max(targets) - np.min(targets) + 1e-8
+        nrmse = rmse / denom
 
-        nrmse = rmse
+        avg_loss = total_loss / (total_samples + 1e-8)
 
-        avg_loss = total_loss / total_samples
-
-        print(f"Client {self.cid} RMSE: {rmse}")
-        print(f"Client {self.cid} MAE: {mae}")
-        print(f"Client {self.cid} NRMSE: {nrmse}")
+        # =========================
+        # SAFE CLEANING
+        # =========================
+        rmse = float(np.nan_to_num(rmse, nan=1.0))
+        mae = float(np.nan_to_num(mae, nan=1.0))
+        nrmse = float(np.nan_to_num(nrmse, nan=1.0))
+        variance = float(np.nan_to_num(variance, nan=1.0))
 
         return (
             float(avg_loss),
             total_samples,
             {
-                "rmse": float(rmse),
-                "mae": float(mae),
-                "nrmse": float(nrmse)
+                "loss": float(avg_loss),
+                "rmse": rmse,
+                "mae": mae,
+                "nrmse": nrmse,
+                "variance": variance,
+                "client_name": f"Client_{self.cid}"
             }
         )
 
@@ -276,17 +221,11 @@ class FedAvgClient(fl.client.NumPyClient):
 if __name__ == "__main__":
 
     cid = sys.argv[1]
-
     alpha = float(sys.argv[2])
 
-    client = FedAvgClient(
-        cid,
-        alpha
-    )
+    client = FedAvgClient(cid, alpha)
 
     fl.client.start_numpy_client(
-
         server_address="localhost:8080",
-
         client=client
     )

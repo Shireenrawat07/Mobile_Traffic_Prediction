@@ -1,13 +1,23 @@
-# fl_server_RA_FedProx_Hybrid.py
+
+# 1. Adaptive Heterogeneity Weighting
+# 2. Hybrid RA-FedAvg + FedAvg Aggregation
+# =========================================================
 
 import os
 import sys
 import json
 import numpy as np
-import pandas as pd
-import torch
 import flwr as fl
+import pandas as pd
 
+from flwr.common import (
+    parameters_to_ndarrays,
+    ndarrays_to_parameters
+)
+
+# =========================================================
+# ROOT PATH
+# =========================================================
 ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
@@ -15,8 +25,10 @@ ROOT = os.path.abspath(
 if ROOT not in sys.path:
     sys.path.append(ROOT)
 
-
-class RAFedProxHybrid(fl.server.strategy.FedAvg):
+# =========================================================
+# RA-FEDAVG STRATEGY
+# =========================================================
+class RAFedAvg(fl.server.strategy.FedAvg):
 
     def __init__(
         self,
@@ -31,19 +43,18 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
         self.split_value = split_value
         self.total_rounds = total_rounds
 
-        self.global_weights = None
-
-        self.round_data = []
         self.all_data = []
-
         self.final_client_metrics = {}
 
-    # =====================================
+    # =====================================================
     # NORMALIZATION
-    # =====================================
+    # =====================================================
     def normalize(self, values):
 
-        values = np.array(values, dtype=np.float64)
+        values = np.array(
+            values,
+            dtype=np.float64
+        )
 
         values = np.nan_to_num(
             values,
@@ -52,20 +63,18 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
             neginf=0.0
         )
 
-        vmin = np.min(values)
-        vmax = np.max(values)
-
-        if abs(vmax - vmin) < 1e-8:
-            return np.ones_like(values) * 0.5
+        if np.max(values) - np.min(values) < 1e-8:
+            return np.ones_like(values)
 
         return (
-            (values - vmin)
-            / (vmax - vmin + 1e-8)
+            (values - np.min(values))
+            /
+            (np.max(values) - np.min(values) + 1e-8)
         )
 
-    # =====================================
-    # FIT AGGREGATION
-    # =====================================
+    # =====================================================
+    # AGGREGATE FIT
+    # =====================================================
     def aggregate_fit(
         self,
         rnd,
@@ -73,7 +82,7 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
         failures
     ):
 
-        if len(results) == 0:
+        if not results:
             return None, {}
 
         weights_list = []
@@ -81,160 +90,170 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
         losses = []
         variances = []
         divergences = []
+        sizes = []
 
-        n_clients = []
-        client_names = []
-
-        # =====================================
-        # COLLECT CLIENT INFO
-        # =====================================
+        # =================================================
+        # EXTRACT CLIENT DATA
+        # =================================================
         for client, fit_res in results:
 
-            weights = fl.common.parameters_to_ndarrays(
+            weights = parameters_to_ndarrays(
                 fit_res.parameters
             )
 
-            loss = float(
-                fit_res.metrics.get("loss", 1.0)
-            )
-
-            variance = float(
-                fit_res.metrics.get("variance", 1.0)
-            )
-
-            divergence = float(
-                fit_res.metrics.get("divergence", 0.0)
-            )
-
-            client_name = fit_res.metrics.get(
-                "client_name",
-                client.cid
-            )
-
-            n_k = fit_res.num_examples
-
-            if np.isnan(loss):
-                loss = 1.0
-
-            if np.isnan(variance):
-                variance = 1.0
-
-            if np.isnan(divergence):
-                divergence = 0.0
-
             weights_list.append(weights)
 
-            losses.append(loss)
-            variances.append(variance)
-            divergences.append(divergence)
-
-            n_clients.append(n_k)
-            client_names.append(client_name)
-
-        # =====================================
-        # NORMALIZE
-        # =====================================
-        loss_norm = self.normalize(losses)
-        var_norm = self.normalize(variances)
-        div_norm = self.normalize(divergences)
-
-        # =====================================
-        # ADAPTIVE LAMBDA
-        # =====================================
-        heterogeneity_factor = 1.0 / max(
-            self.split_value,
-            0.1
-        )
-
-        lambda1 = 0.8 * heterogeneity_factor
-        lambda2 = 0.4 * heterogeneity_factor
-        lambda3 = 0.4 * heterogeneity_factor
-
-        # =====================================
-        # RA-FedAvg RELIABILITY
-        # =====================================
-        R = []
-
-        for i in range(len(results)):
-
-            score = n_clients[i] * np.exp(
-
-                -lambda1 * var_norm[i]
-                -lambda2 * loss_norm[i]
-                -lambda3 * div_norm[i]
-
+            losses.append(
+                float(
+                    fit_res.metrics.get(
+                        "loss",
+                        1.0
+                    )
+                )
             )
 
-            R.append(score)
+            variances.append(
+                float(
+                    fit_res.metrics.get(
+                        "variance",
+                        1.0
+                    )
+                )
+            )
 
-        R = np.array(R)
+            divergences.append(
+                float(
+                    fit_res.metrics.get(
+                        "divergence",
+                        0.0
+                    )
+                )
+            )
 
-        R = np.clip(
-            R,
-            1e-6,
-            1e6
+            sizes.append(
+                fit_res.num_examples
+            )
+
+        # =================================================
+        # NORMALIZE VALUES
+        # =================================================
+        loss_n = self.normalize(losses)
+
+        var_n = self.normalize(variances)
+
+        div_n = self.normalize(divergences)
+
+        # =================================================
+        # ADAPTIVE HETEROGENEITY FACTOR
+        # =================================================
+        heterogeneity_factor = (
+            1.0 /
+            (self.split_value + 1e-8)
         )
 
-        ra_alpha = R / (
-            np.sum(R) + 1e-8
+        lambda1 = 1.0 * heterogeneity_factor
+        lambda2 = 0.5 * heterogeneity_factor
+        lambda3 = 0.5 * heterogeneity_factor
+
+        # =================================================
+        # RELIABILITY SCORE
+        # =================================================
+        reliability_scores = []
+
+        for i in range(len(weights_list)):
+
+            score = (
+                sizes[i]
+                *
+                np.exp(
+                    -(
+                        lambda1 * var_n[i]
+                        +
+                        lambda2 * loss_n[i]
+                        +
+                        lambda3 * div_n[i]
+                    )
+                )
+            )
+
+            reliability_scores.append(score)
+
+        reliability_scores = np.clip(
+            reliability_scores,
+            1e-8,
+            1e8
         )
 
-        # =====================================
-        # FedProx/FedAvg Weight
-        # =====================================
-        fedprox_alpha = np.array(n_clients) / (
-            np.sum(n_clients) + 1e-8
+        reliability_scores = np.array(
+            reliability_scores
         )
 
-        # =====================================
-        # HYBRID FACTOR
-        # =====================================
-        beta = 1.0 / (
-            1.0 + self.split_value
+        # =================================================
+        # RA-FEDAVG WEIGHTS
+        # =================================================
+        ra_alpha = (
+            reliability_scores
+            /
+            (
+                np.sum(reliability_scores)
+                + 1e-8
+            )
+        )
+
+        # =================================================
+        # FEDAVG WEIGHTS
+        # =================================================
+        fedavg_alpha = (
+            np.array(sizes)
+            /
+            (
+                np.sum(sizes)
+                + 1e-8
+            )
+        )
+
+        # =================================================
+        # HYBRID AGGREGATION
+        # =================================================
+        beta = (
+            1.0
+            /
+            (1.0 + self.split_value)
         )
 
         alpha = (
-
             beta * ra_alpha
-
             +
-
-            (1 - beta) * fedprox_alpha
-
+            (1 - beta) * fedavg_alpha
         )
 
-        alpha = alpha / (
-            np.sum(alpha) + 1e-8
+        alpha = (
+            alpha
+            /
+            (
+                np.sum(alpha)
+                + 1e-8
+            )
         )
 
+        # =================================================
+        # PRINT INFO
+        # =================================================
         print(f"\nRound {rnd}")
-        print(f"Hybrid Beta = {beta:.4f}")
-        print(f"Aggregation Weights = {alpha}")
 
-        # =====================================
-        # SAVE ROUND DATA
-        # =====================================
-        self.round_data = []
+        print(
+            f"Heterogeneity Factor: "
+            f"{heterogeneity_factor:.4f}"
+        )
 
-        for i in range(len(client_names)):
+        print(
+            f"Aggregation Weights: "
+            f"{np.round(alpha, 4)}"
+        )
 
-            self.round_data.append([
-
-                self.split_value,
-                client_names[i],
-                losses[i],
-                variances[i],
-                divergences[i],
-                R[i],
-                alpha[i],
-                None,
-                None
-
-            ])
-
-        # =====================================
-        # AGGREGATION
-        # =====================================
+        # =================================================
+        # MODEL AGGREGATION
+        # =================================================
         aggregated = None
 
         for i, weights in enumerate(weights_list):
@@ -242,58 +261,30 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
             if aggregated is None:
 
                 aggregated = [
-                    w * alpha[i]
-                    for w in weights
+                    layer * alpha[i]
+                    for layer in weights
                 ]
 
             else:
 
                 aggregated = [
-
-                    a + w * alpha[i]
-
-                    for a, w in zip(
+                    a + layer * alpha[i]
+                    for a, layer in zip(
                         aggregated,
                         weights
                     )
                 ]
 
-        # =====================================
-        # GLOBAL SMOOTHING
-        # =====================================
-        if self.global_weights is None:
-
-            self.global_weights = aggregated
-
-        else:
-
-            gamma = 0.3
-
-            self.global_weights = [
-
-                (1 - gamma) * gw
-                +
-                gamma * aw
-
-                for gw, aw in zip(
-                    self.global_weights,
-                    aggregated
-                )
-            ]
-
         return (
-
-            fl.common.ndarrays_to_parameters(
-                self.global_weights
+            ndarrays_to_parameters(
+                aggregated
             ),
-
             {}
-
         )
 
-    # =====================================
-    # EVALUATE
-    # =====================================
+    # =====================================================
+    # AGGREGATE EVALUATE
+    # =====================================================
     def aggregate_evaluate(
         self,
         rnd,
@@ -301,73 +292,84 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
         failures
     ):
 
-        if len(results) == 0:
-            return None, {}
+        if not results:
+            return 0.0, {}
 
         total_loss = 0.0
-        total_rmse = 0.0
-        total_examples = 0
+        total_n = 0
 
-        for i, (client, res) in enumerate(results):
+        print(f"\n--- Round {rnd} Evaluation ---")
 
-            n = res.num_examples
+        for _, evaluate_res in results:
 
-            rmse = float(
-                res.metrics.get("rmse", 0.0)
+            n = evaluate_res.num_examples
+
+            total_loss += (
+                evaluate_res.loss * n
+            )
+
+            total_n += n
+
+            metrics = evaluate_res.metrics
+
+            client_name = metrics.get(
+                "client_name",
+                "client"
             )
 
             mae = float(
-                res.metrics.get("mae", 0.0)
+                metrics.get("mae", 0.0)
             )
 
-            total_loss += res.loss * n
-            total_rmse += rmse * n
-            total_examples += n
-
-            self.round_data[i][7] = rmse
-            self.round_data[i][8] = mae
-
-            self.all_data.append(
-                self.round_data[i]
+            rmse = float(
+                metrics.get("rmse", 0.0)
             )
+
+            nrmse = float(
+                metrics.get("nrmse", rmse)
+            )
+
+            print(
+                f"{client_name} -> "
+                f"MAE={mae:.6f}, "
+                f"RMSE={rmse:.6f}"
+            )
+
+            self.all_data.append([
+                self.split_value,
+                client_name,
+                float(evaluate_res.loss),
+                mae,
+                rmse,
+                nrmse,
+                "RAFedAvg",
+                rnd
+            ])
 
             if rnd == self.total_rounds:
 
-                cname = self.round_data[i][1]
-
-                cid = int(
-                    cname.replace(
-                        "Client_",
-                        ""
-                    )
-                )
-
                 self.final_client_metrics[
-                    f"client_{cid}"
+                    client_name
                 ] = {
-
                     "MAE": mae,
                     "RMSE": rmse,
-                    "NRMSE": rmse
-
+                    "NRMSE": nrmse
                 }
 
-        avg_loss = total_loss / (
-            total_examples + 1e-8
-        )
-
-        avg_rmse = total_rmse / (
-            total_examples + 1e-8
+        avg_loss = (
+            total_loss
+            /
+            (total_n + 1e-8)
         )
 
         print(
-            f"Round {rnd} RMSE: "
-            f"{avg_rmse:.6f}"
+            f"Round {rnd} "
+            f"Loss: {avg_loss:.6f}"
         )
 
-        # =====================================
+        # =================================================
         # SAVE RESULTS
-        # =====================================
+        # =================================================
         if rnd == self.total_rounds:
 
             os.makedirs(
@@ -376,37 +378,27 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
             )
 
             df = pd.DataFrame(
-
                 self.all_data,
-
                 columns=[
-
-                    "Split",
-                    "Client",
-                    "Loss",
-                    "Variance",
-                    "Divergence",
-                    "R_k",
-                    "Alpha",
-                    "RMSE",
-                    "MAE"
-
+                    "split",
+                    "client_name",
+                    "loss",
+                    "mae",
+                    "rmse",
+                    "nrmse",
+                    "algorithm",
+                    "round"
                 ]
             )
 
             df.to_csv(
-
-                "results/RA_Fedavg_results/clientwise.csv",
-
+                "results/RA_Fedavg_results/RAFedAvg_clientwise.csv",
                 index=False
             )
 
             with open(
-
                 f"results/RA_Fedavg_results/metrics_alpha_{self.split_value}.json",
-
                 "w"
-
             ) as f:
 
                 json.dump(
@@ -415,48 +407,31 @@ class RAFedProxHybrid(fl.server.strategy.FedAvg):
                     indent=4
                 )
 
-            torch.save(
-
-                {
-
-                    f"layer_{i}": torch.tensor(w)
-
-                    for i, w in enumerate(
-                        self.global_weights
-                    )
-
-                },
-
-                f"results/RA_Fedavg_results/model_alpha_{self.split_value}.pth"
-
-            )
-
             print("\n✅ Results Saved")
 
         return avg_loss, {
-            "rmse": avg_rmse
+            "loss": float(avg_loss)
         }
 
-
-# =====================================
+# =========================================================
 # MAIN
-# =====================================
+# =========================================================
 def main():
 
     if len(sys.argv) < 2:
 
         print(
-            "Usage: python fl_server_RA_FedProx_Hybrid.py <alpha>"
+            "Usage: python "
+            "fl_server_RA_FedAvg.py <alpha>"
         )
 
         sys.exit(1)
 
-    split_value = float(sys.argv[1])
+    alpha = float(sys.argv[1])
 
-    strategy = RAFedProxHybrid(
+    strategy = RAFedAvg(
 
-        split_value=split_value,
-
+        split_value=alpha,
         total_rounds=30,
 
         fraction_fit=1.0,
@@ -468,8 +443,8 @@ def main():
     )
 
     print(
-        f"\n🚀 Starting RA-FedProx Hybrid Server "
-        f"(alpha={split_value})"
+        f"\nStarting RA-FedAvg "
+        f"alpha={alpha}"
     )
 
     fl.server.start_server(
@@ -483,6 +458,8 @@ def main():
         strategy=strategy
     )
 
-
+# =========================================================
+# RUN
+# =========================================================
 if __name__ == "__main__":
     main()
