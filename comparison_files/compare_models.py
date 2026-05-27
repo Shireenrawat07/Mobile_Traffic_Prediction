@@ -78,7 +78,7 @@ for bar in bars2:
 # Labels and title
 plt.xlabel("Models", fontsize=13)
 plt.ylabel("Error Metrics", fontsize=13)
-plt.title("Performance Comparison of Deep Models", fontsize=16)
+plt.title("Performance Comparison of Models", fontsize=16)
 
 # X-axis labels
 plt.xticks(x, model_names, fontsize=11)
