@@ -96,20 +96,14 @@ STRAT_CLR = {"FedAvg": "#58a6ff", "FedProx": "#3fb950", "FedNova": "#d2a8ff"}
 
 # ══════════════════════════════════════════════════════════════════
 # ▶  DATA PATH HELPERS
-#    All paths are built from the three sidebar keys:
-#      strategy  → "FedAvg" | "FedProx" | "FedNova"
-#      model     → "GRU"   | "LSTM"    | "RNN"    | "MLP"
-#      alpha     → 0.1     | 0.5       | 1.0
 # ══════════════════════════════════════════════════════════════════
 
 def metrics_json_path(strategy: str, alpha: float) -> str:
-    """results/{strategy_lower}_results/metrics_alpha_{alpha}.json"""
     return os.path.join("results",
                         f"{strategy.lower()}_results",
                         f"metrics_alpha_{alpha}.json")
 
 def summary_csv_path() -> str:
-    """Primary comparison CSV; tries several known filenames."""
     candidates = [
         os.path.join("results", "results_all_three.csv"),
         os.path.join("results", "fedavg_fedprox_fednova_results.csv"),
@@ -117,13 +111,7 @@ def summary_csv_path() -> str:
     ]
     return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
-
 def model_results_csv_path(model: str) -> str | None:
-    """
-    Per-model results CSV.
-    Naming convention: results/{MODEL}_MODEL_RESULTS.CSV
-    e.g. results/GRU_MODEL_RESULTS.CSV
-    """
     candidates = [
         os.path.join("results/Models_Results", f"{model.upper()}_MODEL_RESULTS.CSV"),
         os.path.join("results", f"{model.upper()}_MODEL_RESULTS.csv"),
@@ -132,44 +120,67 @@ def model_results_csv_path(model: str) -> str | None:
     return next((p for p in candidates if os.path.exists(p)), None)
 
 def plot_image_path(model: str) -> str:
-    """plots/{model_lower}_vs_actual.png"""
     return os.path.join("plots", f"{model.lower()}_vs_actual.png")
 
-def model_pth_path(strategy: str, alpha: float) -> str | None:
-    """Find the saved .pth/.pt for the selected strategy + alpha."""
-    a = str(alpha)
-    candidates = [
-        # Per-strategy folders
-        os.path.join("results", f"{strategy.lower()}_results", f"model_alpha_{a}.pth"),
-        os.path.join("results", f"{strategy.lower()}_results", f"model_alpha_{a}.pt"),
-        # Legacy: fednova uses fednova_ prefix and .pt
+def model_pth_path(strategy: str, alpha: float, arch: str = "") -> str | None:
+    a  = str(alpha)
+    sl = strategy.lower()
+    al = arch.lower() if arch else ""
+    au = arch.upper() if arch else ""
+    candidates = []
+
+    # 1. Arch-specific (highest priority)
+    if al:
+        candidates += [
+            os.path.join("results", f"{sl}_results", f"{al}_model_alpha_{a}.pth"),
+            os.path.join("results", f"{sl}_results", f"{al}_model_alpha_{a}.pt"),
+            os.path.join("results", "Models_Results", f"{au}_model_alpha_{a}.pth"),
+            os.path.join("results", "Models_Results", f"{au}_model_alpha_{a}.pt"),
+        ]
+
+    # 2. Generic per-strategy/alpha
+    candidates += [
+        os.path.join("results", f"{sl}_results", f"model_alpha_{a}.pth"),
+        os.path.join("results", f"{sl}_results", f"model_alpha_{a}.pt"),
+    ]
+
+    # 3. Models_Results folder
+    candidates += [
+        os.path.join("results", "Models_Results", f"{al}_model_alpha_{a}.pth") if al else "",
+        os.path.join("results", "Models_Results", f"{sl}_model_alpha_{a}.pth"),
+        os.path.join("results", "Models_Results", f"model_alpha_{a}.pth"),
+        os.path.join("results", "Models_Results", f"{sl}_model.pth"),
+        os.path.join("results", "Models_Results", "global_model.pth"),
+    ]
+
+    # 4. FedNova legacy naming
+    candidates += [
+        os.path.join("results", "fednova_results", f"fednova_model_alpha_{a}.pt"),
         os.path.join("fednova_results", f"fednova_model_alpha_{a}.pt"),
-        os.path.join("fedavg_results",  f"model_alpha_{a}.pth"),
-        os.path.join("fedprox_results", f"model_alpha_{a}.pth"),
-        # Root fallbacks
-        f"global_model_{strategy.lower()}.pth",
+    ]
+
+    # 5. Old top-level folders & fallbacks
+    candidates += [
+        os.path.join(f"{sl}_results", f"model_alpha_{a}.pth"),
+        f"global_model_{sl}.pth",
+        f"global_model_{al}.pth" if al else "",
         "global_model.pth",
     ]
-    return next((p for p in candidates if os.path.exists(p)), None)
+
+    return next((p for p in candidates if p and os.path.exists(p)), None)
 
 # ══════════════════════════════════════════════════════════════════
 # ▶  METRICS LOADER  (never cached — must update on every change)
 # ══════════════════════════════════════════════════════════════════
 
 def load_metrics(strategy: str, alpha: float) -> dict | None:
-    """
-    Load results/{strategy_lower}_results/metrics_alpha_{alpha}.json
-    Returns the raw dict (keyed by client name) or None if missing.
-    """
     path = metrics_json_path(strategy, alpha)
     if not os.path.exists(path):
         return None
     with open(path) as f:
         return json.load(f)
 
-
 def metrics_to_df(metrics: dict) -> pd.DataFrame:
-    """Flatten {client: {MAE:…, RMSE:…, NRMSE:…}} → DataFrame."""
     rows = [{"client": k, **v} for k, v in metrics.items()]
     return pd.DataFrame(rows)
 
@@ -185,10 +196,8 @@ def load_summary_csv() -> pd.DataFrame | None:
     except Exception:
         return None
 
-
 @st.cache_data(show_spinner=False)
 def load_model_results_csv(model: str) -> pd.DataFrame | None:
-    """Load results/Models_Results/{MODEL}_MODEL_RESULTS.CSV for the selected model."""
     p = model_results_csv_path(model)
     if p is None:
         return None
@@ -197,17 +206,11 @@ def load_model_results_csv(model: str) -> pd.DataFrame | None:
     except Exception:
         return None
 
-
 def filter_summary(df: pd.DataFrame, strategy: str,
                    model: str, alpha: float) -> pd.DataFrame:
-    """
-    Filter the summary CSV by strategy, model, and alpha.
-    Handles flexible column naming (case-insensitive).
-    """
     if df is None:
         return pd.DataFrame()
     out = df.copy()
-    # Detect column names
     col_map = {c.lower(): c for c in df.columns}
 
     strat_col = next((col_map[k] for k in col_map
@@ -234,7 +237,6 @@ def filter_summary(df: pd.DataFrame, strategy: str,
 OUTPUT_SIZE  = 1
 SEQUENCE_LEN = 10
 
-
 def _detect_input_size(ckpt: dict, model_type: str) -> int:
     key_map = {
         "LSTM": ("lstm.weight_ih_l0", 1),
@@ -253,18 +255,14 @@ def _detect_input_size(ckpt: dict, model_type: str) -> int:
         return ckpt[lks[0]].shape[1] if lks else 1
     return 1
 
-
-
 def _safe_keys(ckpt: dict, prefix: str) -> list:
     return [k for k in ckpt if k.startswith(prefix)]
 
-
 def _unwrap_checkpoint(raw) -> dict:
-    """Handle raw state-dicts AND wrapped checkpoints like {"model_state_dict": {...}}."""
     if not isinstance(raw, dict):
         raise ValueError(f"Checkpoint is not a dict (got {type(raw)}).")
     if all(isinstance(v, torch.Tensor) for v in raw.values()):
-        return raw                                         # already a raw state-dict
+        return raw
     for key in ("model_state_dict", "state_dict", "model", "net"):
         if key in raw and isinstance(raw[key], dict):
             return raw[key]
@@ -273,23 +271,15 @@ def _unwrap_checkpoint(raw) -> dict:
             return v
     return raw
 
-
 def _autodetect_arch(ckpt: dict) -> str:
-    """
-    Read checkpoint keys to determine which architecture was saved.
-    The sidebar 'Model Architecture' selector controls plots/CSVs only —
-    all per-strategy model files currently contain the same LSTM weights.
-    """
     if _safe_keys(ckpt, "lstm.weight_ih_l"):   return "LSTM"
     if _safe_keys(ckpt, "gru.weight_ih_l"):    return "GRU"
     if _safe_keys(ckpt, "rnn.weight_ih_l"):    return "RNN"
     if [k for k in ckpt if "conv_stack" in k and k.endswith(".weight")]:  return "CNN"
     if [k for k in ckpt if k.startswith("fc") and k.endswith(".weight")]: return "MLP"
-    return "LSTM"   # safe default
-
+    return "LSTM"
 
 def _build_model(ckpt: dict, arch: str):
-    """Build + load model. arch is the AUTO-DETECTED architecture string."""
     input_size = _detect_input_size(ckpt, arch)
 
     if arch == "LSTM":
@@ -321,7 +311,7 @@ def _build_model(ckpt: dict, arch: str):
         from models.cnn_model import TrafficPredictorCNN
         ckeys = [k for k in ckpt if "conv_stack" in k
                  and k.endswith(".weight") and ckpt[k].ndim == 3]
-        nc, ks, nl = (ckpt[ckeys[0]].shape[0], ckpt[ckeys[0]].shape[2], len(ckeys))                      if ckeys else (64, 3, 3)
+        nc, ks, nl = (ckpt[ckeys[0]].shape[0], ckpt[ckeys[0]].shape[2], len(ckeys)) if ckeys else (64, 3, 3)
         m = TrafficPredictorCNN(input_size=input_size, num_channels=nc,
                                  num_layers=nl, kernel_size=ks, output_size=OUTPUT_SIZE)
 
@@ -338,24 +328,17 @@ def _build_model(ckpt: dict, arch: str):
 
     m.load_state_dict(ckpt)
     m.eval()
-    return m, arch   # always return (model, detected_arch)
-
+    return m, arch
 
 @st.cache_resource(show_spinner=False)
 def _cached_load_model(path: str):
-    """
-    Cached per file-path only.
-    Architecture is auto-detected — the sidebar model selector is for plots/CSVs only.
-    """
     raw  = torch.load(path, map_location="cpu", weights_only=False)
     ckpt = _unwrap_checkpoint(raw)
     arch = _autodetect_arch(ckpt)
-    return _build_model(ckpt, arch)   # → (model, arch)
+    return _build_model(ckpt, arch)
 
-
-def load_pytorch_model(strategy: str, alpha: float):
-    """Returns (model, path, detected_arch, error_str)."""
-    path = model_pth_path(strategy, alpha)
+def load_pytorch_model(strategy: str, arch: str, alpha: float):
+    path = model_pth_path(strategy, alpha, arch)
     if path is None:
         return None, None, None, f"No model file found for {strategy} / α={alpha}."
     try:
@@ -365,17 +348,28 @@ def load_pytorch_model(strategy: str, alpha: float):
         return None, path, None, str(e)
 
 
-
 @st.cache_resource(show_spinner=False)
 def load_scaling_params():
-    for p in ["scaling_params.pt", "scaling_params.pth"]:
+    search_paths = [
+        "scaling_params.pt",
+        "scaling_params.pth",
+        os.path.join("results", "scaling_params.pt"),
+        os.path.join("utils", "scaling_params.pt"),
+        os.path.join("Dataset", "scaling_params.pt"),
+        os.path.join("data", "scaling_params.pt"),
+        os.path.join("results", "Models_Results", "scaling_params.pt"),
+        # specific client scaler paths based on the directory structure
+        os.path.join("Dataset", "ElBorn.csv_scaler.pt"),
+        os.path.join("Dataset", "LesCorts.csv_scaler.pt"),
+        os.path.join("Dataset", "PobleSec.csv_scaler.pt"),
+    ]
+    for p in search_paths:
         if os.path.exists(p):
             try:
                 return torch.load(p, map_location="cpu", weights_only=False)
             except Exception:
                 pass
     return None
-
 
 def scale_input(arr: np.ndarray, params) -> np.ndarray:
     if params is None:
@@ -408,15 +402,32 @@ with st.sidebar:
     st.markdown("---")
     st.markdown('<div class="sec">Configuration</div>', unsafe_allow_html=True)
 
-    fl_strategy = st.selectbox("FL Strategy",       ["FedAvg", "FedProx", "FedNova"])
+    fl_strategy = st.selectbox("FL Strategy",        ["FedAvg", "FedProx", "FedNova"])
     model_type  = st.selectbox("Model Architecture", ["GRU", "LSTM", "RNN", "MLP"])
-    alpha       = st.selectbox("Alpha (α)",          [0.1, 0.5, 1.0],
-                                help="Data heterogeneity — changes results completely")
+
+    def _detect_alphas(strategy: str) -> list:
+        folder = os.path.join("results", f"{strategy.lower()}_results")
+        found = []
+        if os.path.isdir(folder):
+            for fname in os.listdir(folder):
+                if fname.startswith("metrics_alpha_") and fname.endswith(".json"):
+                    try:
+                        found.append(float(
+                            fname.replace("metrics_alpha_","").replace(".json","")))
+                    except ValueError:
+                        pass
+        return sorted(found) if found else [0.1, 0.5, 1.0]
+
+    _avail_alphas = _detect_alphas(fl_strategy)
+    alpha = st.selectbox(
+        "Alpha (α)", _avail_alphas,
+        index=_avail_alphas.index(0.1) if 0.1 in _avail_alphas else 0,
+        help=f"Auto-detected from results folder · Found: {_avail_alphas}"
+    )
 
     st.markdown("---")
     st.markdown('<div class="sec">Status</div>', unsafe_allow_html=True)
 
-    # Metrics JSON status
     json_path = metrics_json_path(fl_strategy, alpha)
     if os.path.exists(json_path):
         st.markdown(f'<div class="ok"> Metrics JSON found<br><small style="color:#6e7681">{json_path}</small></div>',
@@ -425,7 +436,6 @@ with st.sidebar:
         st.markdown(f'<div class="warn">⚠️ JSON not found<br><small>{json_path}</small></div>',
                     unsafe_allow_html=True)
 
-    # Plot image status
     img_path = plot_image_path(model_type)
     if os.path.exists(img_path):
         st.markdown(f'<div class="ok"> Plot found<br><small style="color:#6e7681">{img_path}</small></div>',
@@ -434,28 +444,49 @@ with st.sidebar:
         st.markdown(f'<div class="warn">⚠️ Plot not found<br><small>{img_path}</small></div>',
                     unsafe_allow_html=True)
 
-    # Model weights status — arch is AUTO-DETECTED from checkpoint keys
-    model, loaded_path, detected_arch, err = load_pytorch_model(fl_strategy, alpha)
+    model, loaded_path, detected_arch, err = load_pytorch_model(fl_strategy, model_type, alpha)
     if model:
-        arch_note = f" (actual: {detected_arch})" if detected_arch != model_type else ""
+        arch_note = (f" (actual arch: {detected_arch})"
+                     if detected_arch != model_type else "")
         st.markdown(
-            f'<div class="ok"> <b>{detected_arch}</b> loaded{arch_note}<br>'
+            f'<div class="ok">✅ <b>{detected_arch}</b> loaded{arch_note}<br>'
             f'<small style="color:#6e7681">{loaded_path}</small></div>',
             unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="warn">⚠️ {err}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="warn">⚠️ No model file found<br>'
+            f'<small style="color:#6e7681">'
+            f'Metrics & Plots tabs still work normally.<br>'
+            f'Save a .pth to enable Live Inference.</small></div>',
+            unsafe_allow_html=True)
+        with st.expander("📁 Expected save path"):
+            st.code(
+                f"results/{fl_strategy.lower()}_results/"
+                f"model_alpha_{alpha}.pth\n"
+                f"# or arch-specific:\n"
+                f"results/{fl_strategy.lower()}_results/"
+                f"{model_type.lower()}_model_alpha_{alpha}.pth",
+                language="bash"
+            )
 
     scaling = load_scaling_params()
     if scaling:
-        st.markdown('<div class="ok"> scaling_params.pt loaded</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ok">✅ scaling_params.pt loaded</div>',
+            unsafe_allow_html=True)
     else:
-        st.markdown('<div class="warn">⚠️ scaling_params.pt not found</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="warn">⚠️ scaling_params.pt not found<br>'
+            '<small style="color:#6e7681">'
+            'Only affects Live Inference scaling.<br>'
+            'All other features work normally.</small></div>',
+            unsafe_allow_html=True)
 
     st.markdown("---")
     st.caption("Mobile Traffic Prediction · FL Comparison")
 
 # ══════════════════════════════════════════════════════════════════
-# HEADER  (updates on every sidebar change)
+# HEADER
 # ══════════════════════════════════════════════════════════════════
 st.markdown(f"""
 <h1 style='font-family:Space Mono,monospace;font-size:1.55rem;color:#e6edf3;margin-bottom:.2rem;'>
@@ -471,27 +502,22 @@ st.markdown(f"""
 <hr style='border:none;border-top:1px solid #21262d;margin:.8rem 0 1.4rem;'>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════
-# LOAD THIS SELECTION'S METRICS  (no cache — must reload on change)
-# ══════════════════════════════════════════════════════════════════
-raw_metrics = load_metrics(fl_strategy, alpha)   # dict | None
+raw_metrics = load_metrics(fl_strategy, alpha)
 metrics_df  = metrics_to_df(raw_metrics) if raw_metrics else None
 
 # ══════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2 = st.tabs([
     "📊  Metrics & Comparison",
     "📈  Predicted vs Actual",
-    "⚡  Live Inference",
+    # "⚡  Live Inference",
 ])
 
 # ──────────────────────────────────────────────────────────────────
 # TAB 1 — Metrics & Comparison
 # ──────────────────────────────────────────────────────────────────
 with tab1:
-
-    # ── Section A: Current selection summary cards ───────────────
     st.markdown(
         f'<div class="sec">{fl_strategy} · {model_type} · α={alpha} — Client Results</div>',
         unsafe_allow_html=True)
@@ -504,7 +530,6 @@ with tab1:
     else:
         metric_cols = [c for c in ["MAE", "RMSE", "NRMSE"] if c in metrics_df.columns]
 
-        # Summary stat cards
         c1, c2, c3, c4 = st.columns(4)
         n_clients = metrics_df["client"].nunique() if "client" in metrics_df.columns else "—"
         vals = [
@@ -522,7 +547,6 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Per-client bar chart
         if metric_cols:
             fig = make_subplots(rows=1, cols=len(metric_cols), subplot_titles=metric_cols)
             palette = ["#58a6ff", "#3fb950", "#d2a8ff", "#ffa657", "#f85149", "#79c0ff"]
@@ -542,12 +566,9 @@ with tab1:
                     fig.layout[ax].update(gridcolor="#21262d", linecolor="#30363d")
             st.plotly_chart(fig, width="stretch")
 
-        # Raw table
-        st.markdown('<div class="sec" style="margin-top:1.2rem;">Raw JSON Data</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="sec" style="margin-top:1.2rem;">Raw JSON Data</div>', unsafe_allow_html=True)
         st.dataframe(metrics_df, width="stretch")
 
-    # ── Section B: Alpha sensitivity (all alphas, this strategy) ─
     st.markdown(
         f'<div class="sec" style="margin-top:2rem;">Alpha Sensitivity — {fl_strategy}</div>',
         unsafe_allow_html=True)
@@ -564,7 +585,6 @@ with tab1:
         metric_opt = [c for c in ["MAE", "RMSE", "NRMSE"] if c in alpha_df.columns]
         if metric_opt:
             sel_metric = st.selectbox("Metric", metric_opt, key="alpha_metric")
-            # Highlight selected alpha
             alpha_df["opacity"] = alpha_df["alpha"].apply(lambda a: 1.0 if a == alpha else 0.35)
 
             fig_a = go.Figure()
@@ -586,7 +606,6 @@ with tab1:
                 **PL)
             st.plotly_chart(fig_a, width="stretch")
 
-            # Heatmap
             pivot = alpha_df.pivot_table(index="client", columns="alpha", values=sel_metric)
             fig_h = px.imshow(pivot, text_auto=".4f", color_continuous_scale="Blues",
                                title=f"{sel_metric} heatmap — {fl_strategy}")
@@ -598,7 +617,6 @@ with tab1:
             f'Expected JSONs in <code>results/{fl_strategy.lower()}_results/</code>.</div>',
             unsafe_allow_html=True)
 
-    # ── Section C: Per-model results CSV ─────────────────────────
     st.markdown(
         f'<div class="sec" style="margin-top:2rem;">{model_type} Model — All Results</div>',
         unsafe_allow_html=True)
@@ -607,7 +625,6 @@ with tab1:
     model_csv_path_str = model_results_csv_path(model_type) or f"results/{model_type.upper()}_MODEL_RESULTS.CSV"
 
     if model_csv_df is not None:
-        # Filter by alpha if the column exists
         col_map_m = {c.lower(): c for c in model_csv_df.columns}
         alpha_col_m = next((col_map_m[k] for k in col_map_m if "alpha" in k), None)
         if alpha_col_m:
@@ -645,7 +662,6 @@ with tab1:
             f'<div class="warn">Not found: <code>{model_csv_path_str}</code></div>',
             unsafe_allow_html=True)
 
-    # ── Section D: Cross-strategy comparison CSV ──────────────────
     st.markdown('<div class="sec" style="margin-top:2rem;">Cross-Strategy Comparison</div>',
                 unsafe_allow_html=True)
 
@@ -683,11 +699,9 @@ with tab1:
                 st.plotly_chart(fig_cmp, width="stretch")
 
 # ──────────────────────────────────────────────────────────────────
-# TAB 2 — Predicted vs Actual  (image from /plots/)
+# TAB 2 — Predicted vs Actual
 # ──────────────────────────────────────────────────────────────────
 with tab2:
-
-    # ── Helper: safely load image or show warning ──────────────────
     def show_plot(path, caption="", use_full_width=True):
         if os.path.exists(path):
             st.image(path, caption=caption,
@@ -698,22 +712,15 @@ with tab2:
                 f'<code>{path}</code></div>',
                 unsafe_allow_html=True)
 
-    # ── Three organised panels ────────────────────────────────────
     panel1, panel2, panel3 = st.tabs([
         "🏆  Final Results",
         "🤖  Model Comparison",
         "⚔️  Strategy Comparison",
     ])
 
-    # ══════════════════════════════════════════════════════════════
-    # PANEL 1 — FINAL RESULTS
-    # ══════════════════════════════════════════════════════════════
     with panel1:
-        st.markdown(
-            '<div class="sec">Project Final Results — All Models</div>',
-            unsafe_allow_html=True)
+        st.markdown('<div class="sec">Project Final Results — All Models</div>', unsafe_allow_html=True)
 
-        # Hard metric cards from the bar chart values
         st.markdown("**Performance Summary (FedAvg global model)**")
         models_data = {
             "GRU":  {"MAE": 0.0135, "NRMSE": 0.0289, "color": "#3fb950"},
@@ -742,26 +749,19 @@ with tab2:
             </div>""", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-
-        # Full-width model bar graph
-        show_plot(
-            os.path.join("plots", "models_bar_graph.png"),
-            caption="Performance Comparison — All Deep Models (MAE & NRMSE)"
-        )
-
-        st.markdown('<div class="sec" style="margin-top:1.5rem;">'
-                    'Selected Model — Predicted vs Actual</div>',
-                    unsafe_allow_html=True)
-
-        # Show the currently selected model's plot prominently
-        selected_img = os.path.join(
-            "plots", f"{model_type.lower()}_vs_actual.png")
-        show_plot(
-            selected_img,
-            caption=f"{model_type} Model — Predicted vs Actual Traffic"
-        )
-
-        # Key finding callout
+        show_plot(os.path.join("plots", "models_bar_graph.png"), caption="Performance Comparison — All Deep Models (MAE & NRMSE)")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**All Four Algorithms — Final Comparison**")
+        show_plot(os.path.join("plots", "four_algo_final_comparison.png"), caption="Final comparison across all FL algorithms")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**RMSE across Alpha splits — All Algorithms**")
+        show_plot(os.path.join("plots", "four_algo_split_vs_rmse.png"), caption="All algorithms RMSE vs Dirichlet α")
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**Algorithm Performance Bar Chart**")
+        show_plot(os.path.join("plots", "bargraph_algo_comparison.png"), caption="FL Algorithm comparison bar graph")
+        st.markdown('<div class="sec" style="margin-top:1.5rem;">Selected Model — Predicted vs Actual</div>', unsafe_allow_html=True)
+        selected_img = os.path.join("plots", f"{model_type.lower()}_vs_actual.png")
+        show_plot(selected_img, caption=f"{model_type} Model — Predicted vs Actual Traffic")
         st.markdown(f"""
         <div class="info" style="margin-top:1rem;">
           <b>Key Finding:</b> GRU achieves the lowest MAE (0.0135) and
@@ -771,289 +771,149 @@ with tab2:
           model temporal dependencies in time-series data.
         </div>""", unsafe_allow_html=True)
 
-    # ══════════════════════════════════════════════════════════════
-    # PANEL 2 — MODEL COMPARISON
-    # ══════════════════════════════════════════════════════════════
     with panel2:
-        st.markdown(
-            '<div class="sec">Predicted vs Actual — All Models</div>',
-            unsafe_allow_html=True)
-
-        # Model selector to highlight one
+        st.markdown('<div class="sec">Predicted vs Actual — All Models</div>', unsafe_allow_html=True)
         all_models = ["GRU", "LSTM", "CNN", "RNN", "MLP"]
         highlight = st.radio(
-            "Highlight model",
-            all_models,
-            index=all_models.index(model_type)
-                  if model_type in all_models else 0,
-            horizontal=True,
-            key="model_highlight_radio"
+            "Highlight model", all_models,
+            index=all_models.index(model_type) if model_type in all_models else 0,
+            horizontal=True, key="model_highlight_radio"
         )
-
-        # Show highlighted model full width first
         st.markdown(f"**{highlight} — Full view**")
-        show_plot(
-            os.path.join("plots", f"{highlight.lower()}_vs_actual.png"),
-            caption=f"{highlight}: MAE={models_data[highlight]['MAE']:.4f}  "
-                    f"NRMSE={models_data[highlight]['NRMSE']:.4f}"
-        )
+        show_plot(os.path.join("plots", f"{highlight.lower()}_vs_actual.png"),
+                  caption=f"{highlight}: MAE={models_data[highlight]['MAE']:.4f}  NRMSE={models_data[highlight]['NRMSE']:.4f}")
 
-        st.markdown('<div class="sec" style="margin-top:1.5rem;">'
-                    'All Models — Side by Side</div>',
-                    unsafe_allow_html=True)
+        if os.path.exists(os.path.join("plots", "prediction_lstm_before.png")):
+            st.markdown('<div class="sec" style="margin-top:1.2rem;">LSTM — Before Federated Training</div>', unsafe_allow_html=True)
+            st.markdown("""<div class="info">Shows LSTM predictions <b>before</b> FL training — demonstrates how much the federated process improves accuracy.</div>""", unsafe_allow_html=True)
+            show_plot(os.path.join("plots", "prediction_lstm_before.png"), caption="LSTM before federated training")
 
-        # 2-column grid for all models
-        row1_models = ["GRU", "LSTM", "CNN"]
-        row2_models = ["RNN", "MLP"]
-
+        st.markdown('<div class="sec" style="margin-top:1.5rem;">All Models — Side by Side</div>', unsafe_allow_html=True)
+        row1_models, row2_models = ["GRU", "LSTM", "CNN"], ["RNN", "MLP"]
         cols_r1 = st.columns(3)
         for col, name in zip(cols_r1, row1_models):
             with col:
-                img_path = os.path.join(
-                    "plots", f"{name.lower()}_vs_actual.png")
-                border = ("3px solid " + models_data[name]["color"]
-                          if name == highlight else "1px solid #30363d")
-                st.markdown(
-                    f'<div style="border:{border};border-radius:8px;'
-                    f'padding:4px;margin-bottom:4px;">'
-                    f'<p style="color:{models_data[name]["color"]};'
-                    f'font-weight:700;margin:4px 0 2px 4px;">'
-                    f'{name}  •  MAE {models_data[name]["MAE"]:.4f}  '
-                    f'NRMSE {models_data[name]["NRMSE"]:.4f}</p></div>',
-                    unsafe_allow_html=True)
+                img_path = os.path.join("plots", f"{name.lower()}_vs_actual.png")
+                border = ("3px solid " + models_data[name]["color"] if name == highlight else "1px solid #30363d")
+                st.markdown(f'<div style="border:{border};border-radius:8px;padding:4px;margin-bottom:4px;"><p style="color:{models_data[name]["color"]};font-weight:700;margin:4px 0 2px 4px;">{name}  •  MAE {models_data[name]["MAE"]:.4f}  NRMSE {models_data[name]["NRMSE"]:.4f}</p></div>', unsafe_allow_html=True)
                 show_plot(img_path, caption="")
-
         cols_r2 = st.columns(2)
         for col, name in zip(cols_r2, row2_models):
             with col:
-                img_path = os.path.join(
-                    "plots", f"{name.lower()}_vs_actual.png")
-                border = ("3px solid " + models_data[name]["color"]
-                          if name == highlight else "1px solid #30363d")
-                st.markdown(
-                    f'<div style="border:{border};border-radius:8px;'
-                    f'padding:4px;margin-bottom:4px;">'
-                    f'<p style="color:{models_data[name]["color"]};'
-                    f'font-weight:700;margin:4px 0 2px 4px;">'
-                    f'{name}  •  MAE {models_data[name]["MAE"]:.4f}  '
-                    f'NRMSE {models_data[name]["NRMSE"]:.4f}</p></div>',
-                    unsafe_allow_html=True)
+                img_path = os.path.join("plots", f"{name.lower()}_vs_actual.png")
+                border = ("3px solid " + models_data[name]["color"] if name == highlight else "1px solid #30363d")
+                st.markdown(f'<div style="border:{border};border-radius:8px;padding:4px;margin-bottom:4px;"><p style="color:{models_data[name]["color"]};font-weight:700;margin:4px 0 2px 4px;">{name}  •  MAE {models_data[name]["MAE"]:.4f}  NRMSE {models_data[name]["NRMSE"]:.4f}</p></div>', unsafe_allow_html=True)
                 show_plot(img_path, caption="")
 
-    # ══════════════════════════════════════════════════════════════
-    # PANEL 3 — STRATEGY COMPARISON
-    # ══════════════════════════════════════════════════════════════
     with panel3:
-        st.markdown(
-            '<div class="sec">FL Strategy Comparison — RMSE across α</div>',
-            unsafe_allow_html=True)
-
-        # Strategy interpretation callout
-        st.markdown("""
-        <div class="info">
-          These plots show RMSE at Dirichlet α = 0.1, 0.5, 1.0.
-          Lower α = more heterogeneous (harder) data distribution.
-          <b>FedAvg consistently outperforms FedProx and FedNova</b>
-          on this dataset, suggesting the proximal constraint and
-          normalisation introduce unnecessary complexity for this
-          traffic prediction task.
-        </div>""", unsafe_allow_html=True)
-
+        st.markdown('<div class="sec">FL Strategy Comparison — RMSE across α</div>', unsafe_allow_html=True)
+        st.markdown("""<div class="info">These plots show RMSE at Dirichlet α = 0.1, 0.5, 1.0. Lower α = more heterogeneous (harder) data distribution. <b>FedAvg consistently outperforms FedProx and FedNova</b> on this dataset.</div>""", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
-
-        # Main 3-strategy comparison — full width
         st.markdown("**All Three Strategies — RMSE vs α**")
-        show_plot(
-            os.path.join("plots", "rmse_fedavg_fednova_fedprox.png"),
-            caption="RMSE Comparison: FedAvg vs FedProx vs FedNova "
-                    "across Dirichlet α values"
-        )
-
-        st.markdown(
-            '<div class="sec" style="margin-top:1.5rem;">'
-            'Pairwise Strategy Comparisons</div>',
-            unsafe_allow_html=True)
-
-        # Side-by-side pairwise
+        show_plot(os.path.join("plots", "rmse_fedavg_fednova_fedprox.png"), caption="RMSE Comparison: FedAvg vs FedProx vs FedNova across Dirichlet α values")
+        st.markdown('<div class="sec" style="margin-top:1.5rem;">Pairwise Strategy Comparisons</div>', unsafe_allow_html=True)
         col_l, col_r = st.columns(2)
-        with col_l:
-            show_plot(
-                os.path.join("plots", "rmse_fedavg_fedprox.png"),
-                caption="FedAvg vs FedProx — RMSE across α"
-            )
-        with col_r:
-            show_plot(
-                os.path.join("plots", "rmse_fedavg_fednova.png"),
-                caption="FedAvg vs FedNova — RMSE across α"
-            )
-
-        # Training convergence comparison
-        st.markdown(
-            '<div class="sec" style="margin-top:1.5rem;">'
-            'Training Convergence — Loss per Round</div>',
-            unsafe_allow_html=True)
-
-        st.markdown("""
-        <div class="info">
-          These plots compare training loss convergence across 30
-          communication rounds. All strategies converge rapidly in
-          the first 5 rounds and plateau near round 10, confirming
-          that 30 rounds is sufficient for this task.
-        </div>""", unsafe_allow_html=True)
-
+        with col_l: show_plot(os.path.join("plots", "rmse_fedavg_fedprox.png"), caption="FedAvg vs FedProx — RMSE across α")
+        with col_r: show_plot(os.path.join("plots", "rmse_fedavg_fednova.png"), caption="FedAvg vs FedNova — RMSE across α")
+        st.markdown('<div class="sec" style="margin-top:1.5rem;">Training Convergence — Loss per Round</div>', unsafe_allow_html=True)
         col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            show_plot(
-                os.path.join("plots", "fedavg_median_comp.png"),
-                caption="FedAvg vs MedianAvg — Loss per Round"
-            )
-        with col_b:
-            show_plot(
-                os.path.join("plots", "simple_fedavg_comp.png"),
-                caption="FedAvg vs SimpleAvg — Loss per Round"
-            )
-        with col_c:
-            show_plot(
-                os.path.join("plots", "fedavg_median_simple.png"),
-                caption="FedAvg vs SimpleAvg vs MedianAvg — Loss per Round"
-            )
-
-        # Strategy ranking callout
-        st.markdown("""
-        <div class="sec" style="margin-top:1.5rem;">
-        Strategy Ranking Summary</div>""",
-        unsafe_allow_html=True)
-
-        ranking_cols = st.columns(3)
-        ranking_data = [
-            ("🥇 FedAvg",   "#58a6ff", "RMSE ≈ 0.036–0.045",
-             "Best overall. Simple weighted averaging is most effective "
-             "for homogeneous mobile traffic patterns."),
-            ("🥈 FedProx",  "#ffa657", "RMSE ≈ 0.056–0.100",
-             "Proximal term helps at α=1.0 (IID) but hurts at α=0.5. "
-             "μ tuning required for this dataset."),
-            ("🥉 FedNova",  "#d2a8ff", "RMSE ≈ 0.179–0.184",
-             "Highest error. Normalisation may be over-correcting "
-             "when clients have similar data volumes."),
-        ]
-        for col, (label, color, rmse, note) in zip(
-                ranking_cols, ranking_data):
-            col.markdown(f"""
-            <div class="metric-card" style="border-color:{color};
-                 border-width:2px;text-align:left;padding:1rem;">
-              <div style="font-size:1.1rem;font-weight:700;
-                   color:{color};margin-bottom:.4rem;">{label}</div>
-              <div style="font-family:Space Mono,monospace;
-                   font-size:.85rem;color:{color};
-                   margin-bottom:.5rem;">{rmse}</div>
-              <div style="font-size:.82rem;color:#c9d1d9;">
-                   {note}</div>
-            </div>""", unsafe_allow_html=True)
-
+        with col_a: show_plot(os.path.join("plots", "fedavg_median_comp.png"), caption="FedAvg vs MedianAvg — Loss per Round")
+        with col_b: show_plot(os.path.join("plots", "simple_fedavg_comp.png"), caption="FedAvg vs SimpleAvg — Loss per Round")
+        with col_c: show_plot(os.path.join("plots", "fedavg_median_simple.png"), caption="FedAvg vs SimpleAvg vs MedianAvg — Loss per Round")
 
 # ──────────────────────────────────────────────────────────────────
 # TAB 3 — Live Inference
 # ──────────────────────────────────────────────────────────────────
-with tab3:
-    st.markdown('<div class="sec">Live Inference</div>', unsafe_allow_html=True)
+# with tab3:
+#     st.markdown('<div class="sec">Live Inference</div>', unsafe_allow_html=True)
  
-    def run_inference(X_np: np.ndarray) -> float:
-        X_scaled = scale_input(X_np, scaling)
-        X_t = torch.tensor(X_scaled, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            out = model(X_t)
-        return out.squeeze().item()
+#     def run_inference(X_np: np.ndarray) -> float:
+#         X_scaled = scale_input(X_np, scaling)
+#         X_t = torch.tensor(X_scaled, dtype=torch.float32).unsqueeze(0)
+#         with torch.no_grad():
+#             out = model(X_t)
+#         return out.squeeze().item()
  
-    if model is None:
-        st.markdown(
-            f'<div class="warn">⚠️ No model loaded — {err}<br>'
-            f'Expected path: <code>{model_pth_path(fl_strategy, alpha) or "not found"}</code></div>',
-            unsafe_allow_html=True)
-    else:
-        raw_check  = torch.load(loaded_path, map_location="cpu", weights_only=False)
-        ckpt_check = _unwrap_checkpoint(raw_check)
-        n_features = _detect_input_size(ckpt_check, detected_arch)
-        feat_names = [f"feature_{i + 1}" for i in range(n_features)]
+#     if model is None:
+#         fallback_path = f"results/{fl_strategy.lower()}_results/{model_type.lower()}_model_alpha_{alpha}.pth"
+#         st.markdown(
+#             f'<div class="warn">⚠️ No model loaded — {err}<br>'
+#             f'Expected path: <code>{loaded_path or fallback_path}</code></div>',
+#             unsafe_allow_html=True)
+#     else:
+#         raw_check  = torch.load(loaded_path, map_location="cpu", weights_only=False)
+#         ckpt_check = _unwrap_checkpoint(raw_check)
+#         n_features = _detect_input_size(ckpt_check, detected_arch)
+#         feat_names = [f"feature_{i + 1}" for i in range(n_features)]
  
-        arch_note2 = f" (sidebar: {model_type})" if detected_arch != model_type else ""
-        st.markdown(
-            f'<div class="info">Arch: <b>{detected_arch}</b>{arch_note2} · '
-            f'{fl_strategy} · α={alpha} · {n_features} input feature(s)<br>'
-            f'<small style="color:#6e7681">Weights: {loaded_path}</small></div>',
-            unsafe_allow_html=True)
+#         arch_note2 = f" (sidebar: {model_type})" if detected_arch != model_type else ""
+#         st.markdown(
+#             f'<div class="info">Arch: <b>{detected_arch}</b>{arch_note2} · '
+#             f'{fl_strategy} · α={alpha} · {n_features} input feature(s)<br>'
+#             f'<small style="color:#6e7681">Weights: {loaded_path}</small></div>',
+#             unsafe_allow_html=True)
  
-        input_mode = st.radio("Input method", ["Manual entry", "Upload CSV"], horizontal=True)
-        st.markdown("<br>", unsafe_allow_html=True)
+#         input_mode = st.radio("Input method", ["Manual entry", "Upload CSV"], horizontal=True)
+#         st.markdown("<br>", unsafe_allow_html=True)
  
-        if input_mode == "Manual entry":
-            st.markdown(
-                f'<div class="info"><b>{SEQUENCE_LEN} timesteps × {n_features} feature(s)</b>. '
-                f'Each row = one time step.</div>', unsafe_allow_html=True)
-            default_df = pd.DataFrame(np.zeros((SEQUENCE_LEN, n_features)), columns=feat_names)
-            edited = st.data_editor(default_df, width="stretch", num_rows="fixed")
+#         if input_mode == "Manual entry":
+#             st.markdown(f'<div class="info"><b>{SEQUENCE_LEN} timesteps × {n_features} feature(s)</b>. Each row = one time step.</div>', unsafe_allow_html=True)
+#             default_df = pd.DataFrame(np.zeros((SEQUENCE_LEN, n_features)), columns=feat_names)
+#             edited = st.data_editor(default_df, width="stretch", num_rows="fixed")
  
-            if st.button("▶  Run Prediction"):
-                try:
-                    pred = run_inference(edited.values.astype(np.float32))
-                    st.markdown(f"""
-                    <div class="pred-box">
-                      <div class="metric-label">Predicted Traffic Volume</div>
-                      <div style='font-family:Space Mono,monospace;font-size:3rem;
-                                  color:#3fb950;font-weight:700;'>{pred:.4f}</div>
-                      <div style='color:#6e7681;font-size:.8rem;margin-top:.4rem;'>
-                        {model_type} · {fl_strategy} · α={alpha}
-                      </div>
-                    </div>""", unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"Inference error: {e}")
+#             if st.button("▶  Run Prediction"):
+#                 try:
+#                     pred = run_inference(edited.values.astype(np.float32))
+#                     st.markdown(f"""
+#                     <div class="pred-box">
+#                       <div class="metric-label">Predicted Traffic Volume</div>
+#                       <div style='font-family:Space Mono,monospace;font-size:3rem;color:#3fb950;font-weight:700;'>{pred:.4f}</div>
+#                       <div style='color:#6e7681;font-size:.8rem;margin-top:.4rem;'>{model_type} · {fl_strategy} · α={alpha}</div>
+#                     </div>""", unsafe_allow_html=True)
+#                 except Exception as e:
+#                     st.error(f"Inference error: {e}")
  
-        else:
-            st.markdown(
-                f'<div class="info">Upload a CSV with ≥ <b>{n_features}</b> numeric columns. '
-                f'Last <b>{SEQUENCE_LEN}</b> rows = one window.</div>', unsafe_allow_html=True)
-            uploaded = st.file_uploader("Upload CSV", type=["csv"])
+#         else:
+#             st.markdown(f'<div class="info">Upload a CSV with ≥ <b>{n_features}</b> numeric columns. Last <b>{SEQUENCE_LEN}</b> rows = one window.</div>', unsafe_allow_html=True)
+#             uploaded = st.file_uploader("Upload CSV", type=["csv"])
  
-            if uploaded:
-                try:
-                    df_up    = pd.read_csv(uploaded)
-                    num_cols = df_up.select_dtypes(include=[np.number]).columns.tolist()
-                    if len(num_cols) < n_features:
-                        st.error(f"Need ≥ {n_features} numeric columns, found {len(num_cols)}.")
-                    else:
-                        feat_data = df_up[num_cols[:n_features]].values.astype(np.float32)
-                        st.caption(f"{len(df_up)} rows × {n_features} features")
-                        st.dataframe(df_up[num_cols[:n_features]].tail(SEQUENCE_LEN), width="stretch")
+#             if uploaded:
+#                 try:
+#                     df_up    = pd.read_csv(uploaded)
+#                     num_cols = df_up.select_dtypes(include=[np.number]).columns.tolist()
+#                     if len(num_cols) < n_features:
+#                         st.error(f"Need ≥ {n_features} numeric columns, found {len(num_cols)}.")
+#                     else:
+#                         feat_data = df_up[num_cols[:n_features]].values.astype(np.float32)
+#                         st.caption(f"{len(df_up)} rows × {n_features} features")
+#                         st.dataframe(df_up[num_cols[:n_features]].tail(SEQUENCE_LEN), width="stretch")
  
-                        ca, cb = st.columns(2)
-                        with ca:
-                            if st.button(f"▶  Predict (last {SEQUENCE_LEN} rows)"):
-                                pred = run_inference(feat_data[-SEQUENCE_LEN:])
-                                st.markdown(f"""
-                                <div class="pred-box">
-                                  <div class="metric-label">Predicted Traffic Volume</div>
-                                  <div style='font-family:Space Mono,monospace;font-size:2.5rem;
-                                              color:#3fb950;font-weight:700;'>{pred:.4f}</div>
-                                  <div style='color:#6e7681;font-size:.8rem;margin-top:.4rem;'>
-                                    {model_type} · {fl_strategy} · α={alpha}
-                                  </div>
-                                </div>""", unsafe_allow_html=True)
-                        with cb:
-                            if st.button("⚡  Batch (sliding window)"):
-                                if len(feat_data) < SEQUENCE_LEN:
-                                    st.warning(f"Need ≥ {SEQUENCE_LEN} rows.")
-                                else:
-                                    preds_b = [run_inference(feat_data[i - SEQUENCE_LEN: i])
-                                               for i in range(SEQUENCE_LEN, len(feat_data) + 1)]
-                                    fig_b = go.Figure()
-                                    fig_b.add_trace(go.Scatter(y=preds_b, mode="lines",
-                                                                line=dict(color="#58a6ff", width=1.5),
-                                                                name="Predicted"))
-                                    fig_b.update_layout(height=300, title="Batch Predictions",
-                                                         xaxis_title="Window", yaxis_title="Traffic", **PL)
-                                    st.plotly_chart(fig_b, width="stretch")
-                                    dl = pd.DataFrame({"prediction": preds_b})
-                                    st.download_button("⬇ Download CSV", dl.to_csv(index=False),
-                                                       "predictions.csv", "text/csv")
-                except Exception as e:
-                    st.error(f"Error: {e}")
- 
+#                         ca, cb = st.columns(2)
+#                         with ca:
+#                             if st.button(f"▶  Predict (last {SEQUENCE_LEN} rows)"):
+#                                 pred = run_inference(feat_data[-SEQUENCE_LEN:])
+#                                 st.markdown(f"""
+#                                 <div class="pred-box">
+#                                   <div class="metric-label">Predicted Traffic Volume</div>
+#                                   <div style='font-family:Space Mono,monospace;font-size:2.5rem;color:#3fb950;font-weight:700;'>{pred:.4f}</div>
+#                                   <div style='color:#6e7681;font-size:.8rem;margin-top:.4rem;'>{model_type} · {fl_strategy} · α={alpha}</div>
+#                                 </div>""", unsafe_allow_html=True)
+#                         with cb:
+#                             if st.button("⚡  Batch (sliding window)"):
+#                                 if len(feat_data) < SEQUENCE_LEN:
+#                                     st.warning(f"Need ≥ {SEQUENCE_LEN} rows.")
+#                                 else:
+#                                     preds_b = [run_inference(feat_data[i - SEQUENCE_LEN: i])
+#                                                for i in range(SEQUENCE_LEN, len(feat_data) + 1)]
+#                                     fig_b = go.Figure()
+#                                     fig_b.add_trace(go.Scatter(y=preds_b, mode="lines",
+#                                                                 line=dict(color="#58a6ff", width=1.5),
+#                                                                 name="Predicted"))
+#                                     fig_b.update_layout(height=300, title="Batch Predictions",
+#                                                          xaxis_title="Window", yaxis_title="Traffic", **PL)
+#                                     st.plotly_chart(fig_b, width="stretch")
+#                                     dl = pd.DataFrame({"prediction": preds_b})
+#                                     st.download_button("⬇ Download CSV", dl.to_csv(index=False),
+#                                                        "predictions.csv", "text/csv")
+#                 except Exception as e:
+#                     st.error(f"Error: {e}")
