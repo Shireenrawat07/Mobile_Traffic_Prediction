@@ -78,6 +78,12 @@ section[data-testid="stSidebar"] label {
 .ok    { background: #0d2a1a; border-left: 3px solid #3fb950;
          border-radius: 0 8px 8px 0; padding: .75rem 1rem;
          margin: .4rem 0; font-size: .84rem; color: #c9d1d9; }
+.ra-badge {
+    background: linear-gradient(135deg, #1a1040, #1e1535);
+    border-left: 3px solid #a371f7;
+    border-radius: 0 8px 8px 0; padding: .75rem 1rem;
+    margin: .4rem 0; font-size: .84rem; color: #c9d1d9;
+}
 
 .stButton > button {
     background: linear-gradient(90deg, #1f6feb, #388bfd); color: white; border: none;
@@ -104,7 +110,12 @@ PL = dict(
     legend=dict(bgcolor="#161b27", bordercolor="#30363d", borderwidth=1),
     margin=dict(l=50, r=30, t=50, b=50),
 )
-STRAT_CLR  = {"FedAvg": "#58a6ff", "FedProx": "#3fb950", "FedNova": "#d2a8ff"}
+STRAT_CLR = {
+    "FedAvg":   "#58a6ff",
+    "FedProx":  "#3fb950",
+    "FedNova":  "#d2a8ff",
+    "RA_FedAvg": "#a371f7",   # purple — distinct from the existing three
+}
 MODEL_DATA = {
     "GRU":  {"MAE": 0.0135, "NRMSE": 0.0289, "color": "#3fb950"},
     "LSTM": {"MAE": 0.0137, "NRMSE": 0.0286, "color": "#58a6ff"},
@@ -114,18 +125,31 @@ MODEL_DATA = {
 }
 
 # ══════════════════════════════════════════════════════════════════
+# STRATEGY → FOLDER NAME MAPPING
+# Handles the mixed-case "RA_Fedavg_results" folder name
+# ══════════════════════════════════════════════════════════════════
+STRATEGY_FOLDER = {
+    "FedAvg":    "fedavg_results",
+    "FedProx":   "fedprox_results",
+    "FedNova":   "fednova_results",
+    "RA_FedAvg": "RA_Fedavg_results",
+}
+
+def strategy_folder(strategy: str) -> str:
+    return STRATEGY_FOLDER.get(strategy, f"{strategy.lower()}_results")
+
+# ══════════════════════════════════════════════════════════════════
 # PATH HELPERS
 # ══════════════════════════════════════════════════════════════════
 
 def metrics_json_path(strategy: str, alpha: float) -> str:
-    return os.path.join("results",
-                        f"{strategy.lower()}_results",
+    return os.path.join("results", strategy_folder(strategy),
                         f"metrics_alpha_{alpha}.json")
 
 
 def _detect_alphas(strategy: str) -> list:
     """Scan results folder for ALL available alpha values from JSON files."""
-    folder = os.path.join("results", f"{strategy.lower()}_results")
+    folder = os.path.join("results", strategy_folder(strategy))
     alphas = []
     if os.path.isdir(folder):
         for fname in os.listdir(folder):
@@ -150,6 +174,16 @@ def summary_csv_path() -> str:
     return next((p for p in candidates if os.path.exists(p)), candidates[0])
 
 
+def ra_fedavg_csv_path() -> str | None:
+    """Path to the RA_FedAvg clientwise CSV."""
+    candidates = [
+        os.path.join("results", "RA_Fedavg_results", "RAFedAvg_clientwise.csv"),
+        os.path.join("results", "RA_Fedavg_results", "rafedavg_clientwise.csv"),
+        os.path.join("results", "RA_Fedavg_results", "RA_FedAvg_clientwise.csv"),
+    ]
+    return next((p for p in candidates if os.path.exists(p)), candidates[0])
+
+
 def model_results_csv_path(model: str) -> str | None:
     """results/Models_Results/{MODEL}_MODEL_RESULTS.CSV"""
     candidates = [
@@ -165,20 +199,18 @@ def model_results_csv_path(model: str) -> str | None:
 
 def model_pth_path(strategy: str, alpha: float, arch: str = "") -> str | None:
     """Search all known locations for a saved .pth / .pt model file."""
-    a, sl, al = str(alpha), strategy.lower(), arch.lower() if arch else ""
+    a, sl, al = str(alpha), strategy_folder(strategy), arch.lower() if arch else ""
     candidates = []
     if al:
         candidates += [
-            os.path.join("results", f"{sl}_results",
-                         f"{al}_model_alpha_{a}.pth"),
+            os.path.join("results", sl, f"{al}_model_alpha_{a}.pth"),
         ]
     candidates += [
-        os.path.join("results", f"{sl}_results", f"model_alpha_{a}.pth"),
-        os.path.join("results", f"{sl}_results", f"model_alpha_{a}.pt"),
+        os.path.join("results", sl, f"model_alpha_{a}.pth"),
+        os.path.join("results", sl, f"model_alpha_{a}.pt"),
         os.path.join("results", "Models_Results", f"{sl}_model_alpha_{a}.pth"),
         os.path.join("results", "Models_Results", "global_model.pth"),
-        os.path.join("results", "fednova_results",
-                     f"fednova_model_alpha_{a}.pt"),
+        os.path.join("results", "fednova_results", f"fednova_model_alpha_{a}.pt"),
         f"global_model_{sl}.pth",
         "global_model.pth",
     ]
@@ -227,17 +259,24 @@ def load_model_results_csv(model: str) -> pd.DataFrame | None:
     except Exception:
         return None
 
+
+@st.cache_data(show_spinner=False)
+def load_ra_fedavg_csv() -> pd.DataFrame | None:
+    p = ra_fedavg_csv_path()
+    try:
+        return pd.read_csv(p) if os.path.exists(p) else None
+    except Exception:
+        return None
+
 # ══════════════════════════════════════════════════════════════════
-# SCALING PARAMS  — searches Dataset/ for .csv_scaler.pt files
+# SCALING PARAMS
 # ══════════════════════════════════════════════════════════════════
 
 @st.cache_resource(show_spinner=False)
 def load_scaling_params():
     search = [
-        # Dataset folder — per-city scaler files
         *glob.glob(os.path.join("Dataset", "*.csv_scaler.pt")),
         *glob.glob(os.path.join("Dataset", "*.scaler.pt")),
-        # Root-level fallbacks
         "scaling_params.pt",
         "scaling_params.pth",
         os.path.join("results", "scaling_params.pt"),
@@ -246,8 +285,7 @@ def load_scaling_params():
     for p in search:
         if os.path.exists(p):
             try:
-                return torch.load(p, map_location="cpu",
-                                  weights_only=False), p
+                return torch.load(p, map_location="cpu", weights_only=False), p
             except Exception:
                 pass
     return None, None
@@ -420,15 +458,13 @@ def load_pytorch_model(strategy, alpha, arch=""):
 with st.sidebar:
     st.markdown("## 📡 FL Dashboard")
     st.markdown("---")
-    st.markdown('<div class="sec">Configuration</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="sec">Configuration</div>', unsafe_allow_html=True)
 
     fl_strategy = st.selectbox("FL Strategy",
-                                ["FedAvg", "FedProx", "FedNova"])
+                                ["FedAvg", "FedProx", "FedNova", "RA_FedAvg"])
     model_type  = st.selectbox("Model Architecture",
                                 ["GRU", "LSTM", "RNN", "CNN", "MLP"])
 
-    # Auto-detect ALL available alphas from JSON files in results folder
     _avail_alphas = _detect_alphas(fl_strategy)
     alpha = st.selectbox(
         "Alpha (α)", _avail_alphas,
@@ -439,7 +475,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown('<div class="sec">Status</div>', unsafe_allow_html=True)
 
-    # Metrics JSON
     json_path = metrics_json_path(fl_strategy, alpha)
     if os.path.exists(json_path):
         st.markdown(
@@ -452,7 +487,20 @@ with st.sidebar:
             f'<small>{json_path}</small></div>',
             unsafe_allow_html=True)
 
-    # Plot image
+    # RA_FedAvg clientwise CSV status
+    if fl_strategy == "RA_FedAvg":
+        ra_csv_p = ra_fedavg_csv_path()
+        if os.path.exists(ra_csv_p):
+            st.markdown(
+                f'<div class="ok">✅ RAFedAvg CSV found<br>'
+                f'<small style="color:#6e7681">{ra_csv_p}</small></div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div class="warn">⚠️ RAFedAvg CSV not found<br>'
+                f'<small>{ra_csv_p}</small></div>',
+                unsafe_allow_html=True)
+
     img_path = plot_image_path(model_type)
     if os.path.exists(img_path):
         st.markdown(
@@ -465,7 +513,6 @@ with st.sidebar:
             f'<small>{img_path}</small></div>',
             unsafe_allow_html=True)
 
-    # Model weights
     model, loaded_path, detected_arch, err = load_pytorch_model(
         fl_strategy, alpha, model_type)
     if model:
@@ -484,11 +531,10 @@ with st.sidebar:
             unsafe_allow_html=True)
         with st.expander("📁 Expected save path"):
             st.code(
-                f"results/{fl_strategy.lower()}_results/"
+                f"results/{strategy_folder(fl_strategy)}/"
                 f"model_alpha_{alpha}.pth",
                 language="bash")
 
-    # Scaling params — searches Dataset/*.csv_scaler.pt
     scaling_data, scaling_path = load_scaling_params()
     if scaling_data:
         st.markdown(
@@ -509,16 +555,18 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════
 # HEADER
 # ══════════════════════════════════════════════════════════════════
+strat_badge_color = STRAT_CLR.get(fl_strategy, "#58a6ff")
 st.markdown(f"""
 <h1 style='font-family:Space Mono,monospace;font-size:1.55rem;
            color:#e6edf3;margin-bottom:.2rem;'>
   Mobile Traffic Prediction
 </h1>
 <p style='color:#8b949e;font-size:.9rem;margin-top:0;'>
-  {fl_strategy} &nbsp;·&nbsp; {model_type} &nbsp;·&nbsp; α = {alpha}
+  <span style='color:{strat_badge_color};font-weight:700;'>{fl_strategy}</span>
+  &nbsp;·&nbsp; {model_type} &nbsp;·&nbsp; α = {alpha}
   &nbsp;<span style='color:#30363d'>|</span>&nbsp;
   <span style='color:#6e7681;font-size:.8rem;'>Metrics from:
-    <code style='color:#58a6ff'>{json_path}</code>
+    <code style='color:{strat_badge_color}'>{json_path}</code>
   </span>
 </p>
 <hr style='border:none;border-top:1px solid #21262d;margin:.8rem 0 1.4rem;'>
@@ -543,6 +591,9 @@ tab1, tab2, tab3 = st.tabs([
 # TAB 1 — Metrics & Comparison
 # ──────────────────────────────────────────────────────────────────
 with tab1:
+
+    _SKIP = {"split","alpha","client","model","algorithm",
+             "strategy","method","arch","round"}
 
     # ── Section A: Current selection ─────────────────────────────
     st.markdown(
@@ -596,21 +647,20 @@ with tab1:
                 **PL)
             for ax in list(fig.layout):
                 if ax.startswith(("xaxis", "yaxis")):
-                    fig.layout[ax].update(gridcolor="#21262d",
-                                           linecolor="#30363d")
-            st.plotly_chart(fig, width="stretch")
+                    fig.layout[ax].update(gridcolor="#21262d", linecolor="#30363d")
+            st.plotly_chart(fig, use_container_width=True)
 
         st.markdown('<div class="sec" style="margin-top:1.2rem;">'
                     'Raw JSON Data</div>', unsafe_allow_html=True)
-        st.dataframe(metrics_df, width="stretch")
+        st.dataframe(metrics_df, use_container_width=True)
 
-    # ── Section B: Alpha Sensitivity — ALL available alphas ───────
+    # ── Section B: Alpha Sensitivity ─────────────────────────────
     st.markdown(
         f'<div class="sec" style="margin-top:2rem;">'
         f'Alpha Sensitivity — {fl_strategy} (all α values)</div>',
         unsafe_allow_html=True)
 
-    all_alphas = _detect_alphas(fl_strategy)   # ← dynamic, not hardcoded
+    all_alphas = _detect_alphas(fl_strategy)
     all_alpha_rows = []
     for a in all_alphas:
         m = load_metrics(fl_strategy, a)
@@ -624,10 +674,8 @@ with tab1:
         metric_opt = [c for c in ["MAE", "RMSE", "NRMSE"]
                       if c in alpha_df.columns]
         if metric_opt:
-            sel_metric = st.selectbox("Metric", metric_opt,
-                                       key="alpha_metric")
+            sel_metric = st.selectbox("Metric", metric_opt, key="alpha_metric")
 
-            # Bar chart — all alphas, selected alpha at full opacity
             fig_a = go.Figure()
             for a_val in all_alphas:
                 sub     = alpha_df[alpha_df["alpha"] == a_val]
@@ -645,9 +693,8 @@ with tab1:
                 title_text=(f"{fl_strategy} — {sel_metric} across all α "
                             f"(α={alpha} highlighted)"),
                 **PL)
-            st.plotly_chart(fig_a, width="stretch")
+            st.plotly_chart(fig_a, use_container_width=True)
 
-            # Line chart — mean per alpha across clients
             st.markdown("**Average across clients — trend by α**")
             mean_per_alpha = (alpha_df.groupby("alpha")[sel_metric]
                               .mean().reset_index())
@@ -659,42 +706,204 @@ with tab1:
                 color_discrete_sequence=[STRAT_CLR.get(fl_strategy,"#58a6ff")],
             )
             fig_line.add_vline(
-                x=alpha, line_dash="dash",
-                line_color="#d29922",
+                x=alpha, line_dash="dash", line_color="#d29922",
                 annotation_text=f"selected α={alpha}",
                 annotation_position="top right")
             fig_line.update_traces(line_width=2.5, marker_size=9)
             fig_line.update_layout(height=320, **PL)
-            st.plotly_chart(fig_line, width="stretch")
+            st.plotly_chart(fig_line, use_container_width=True)
 
-            # Heatmap
             pivot = alpha_df.pivot_table(index="client", columns="alpha",
                                           values=sel_metric)
             fig_h = px.imshow(pivot, text_auto=".4f",
                                color_continuous_scale="Blues",
                                title=f"{sel_metric} heatmap — {fl_strategy}")
             fig_h.update_layout(**PL, height=320)
-            st.plotly_chart(fig_h, width="stretch")
+            st.plotly_chart(fig_h, use_container_width=True)
     else:
         st.markdown(
             f'<div class="warn">No alpha data found for {fl_strategy}. '
             f'Expected JSONs in '
-            f'<code>results/{fl_strategy.lower()}_results/</code>.</div>',
+            f'<code>results/{strategy_folder(fl_strategy)}/</code>.</div>',
             unsafe_allow_html=True)
 
-    # ── Section C: Per-model CSV ──────────────────────────────────
+    # ── Section C: RA_FedAvg — dedicated clientwise CSV section ───
+    st.markdown(
+        '<div class="sec" style="margin-top:2rem;">'
+        '⭐ RA_FedAvg — Clientwise Results</div>',
+        unsafe_allow_html=True)
+
+    ra_df = load_ra_fedavg_csv()
+    ra_csv_display_path = ra_fedavg_csv_path()
+
+    if ra_df is not None:
+        st.markdown(
+            f'<div class="ra-badge">📂 <code>{ra_csv_display_path}</code> · '
+            f'{len(ra_df)} rows · {len(ra_df.columns)} columns</div>',
+            unsafe_allow_html=True)
+
+        ra_num_cols = [c for c in ra_df.select_dtypes(include=[np.number]).columns
+                       if c.lower() not in _SKIP]
+        ra_metric_priority = [c for c in ra_df.columns if c.upper() in ("MAE","RMSE","NRMSE")]
+        ra_plot_metrics = ra_metric_priority or ra_num_cols
+
+        # Summary metric cards from mean of all numeric columns
+        if ra_plot_metrics:
+            card_cols = st.columns(min(len(ra_plot_metrics), 4))
+            for col, mc in zip(card_cols, ra_plot_metrics[:4]):
+                col.markdown(f"""<div class="metric-card"
+                     style="border-color:#a371f7;border-width:1px;">
+                  <div class="metric-label" style="color:#a371f7;">{mc}</div>
+                  <div class="metric-value" style="color:#a371f7;">
+                    {ra_df[mc].mean():.4f}
+                  </div>
+                  <div class="metric-sub">avg across clients</div>
+                </div>""", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+        col_l, col_r = st.columns([5, 5])
+        with col_l:
+            st.dataframe(ra_df, use_container_width=True)
+
+        with col_r:
+            if ra_plot_metrics:
+                sel_ra_m = st.selectbox("Metric", ra_plot_metrics,
+                                         key="ra_metric_sel")
+
+                # Detect axis columns
+                alpha_col_ra  = next(
+                    (c for c in ra_df.columns
+                     if any(k in c.lower() for k in ["alpha","split"])), None)
+                client_col_ra = next(
+                    (c for c in ra_df.columns
+                     if "client" in c.lower()), None)
+                algo_col_ra   = next(
+                    (c for c in ra_df.columns
+                     if any(k in c.lower() for k in
+                            ["algorithm","strategy","method"])), None)
+
+                if alpha_col_ra and ra_df[alpha_col_ra].nunique() > 1:
+                    # Line chart: metric vs alpha
+                    grp_cols = [alpha_col_ra] + ([algo_col_ra] if algo_col_ra else [])
+                    agg_ra = ra_df.groupby(grp_cols)[sel_ra_m].mean().reset_index()
+                    fig_ra = px.line(
+                        agg_ra.sort_values(alpha_col_ra),
+                        x=alpha_col_ra, y=sel_ra_m,
+                        color=algo_col_ra,
+                        markers=True,
+                        title=f"RA_FedAvg — {sel_ra_m} vs α",
+                        color_discrete_sequence=["#a371f7"],
+                        labels={alpha_col_ra: "Alpha (α)", sel_ra_m: sel_ra_m})
+                    fig_ra.update_traces(line_width=2.5, marker_size=9)
+                elif client_col_ra:
+                    # Bar chart: per client
+                    fig_ra = px.bar(
+                        ra_df, x=client_col_ra, y=sel_ra_m,
+                        color=algo_col_ra if algo_col_ra else None,
+                        title=f"RA_FedAvg — {sel_ra_m} per client",
+                        text_auto=".4f",
+                        color_discrete_sequence=["#a371f7"])
+                    fig_ra.update_traces(textposition="outside")
+                else:
+                    # Fallback horizontal bar
+                    fig_ra = px.bar(
+                        ra_df, x=sel_ra_m,
+                        y=ra_df.index.astype(str),
+                        orientation="h",
+                        title=f"RA_FedAvg — {sel_ra_m}",
+                        text_auto=".4f",
+                        color_discrete_sequence=["#a371f7"])
+                    fig_ra.update_traces(textposition="outside")
+
+                fig_ra.update_layout(height=360, **PL)
+                st.plotly_chart(fig_ra, use_container_width=True)
+
+        # ── RA_FedAvg vs other strategies — multi-alpha comparison ──
+        if alpha_col_ra and ra_plot_metrics:
+            st.markdown(
+                '<div class="sec" style="margin-top:1.5rem;">'
+                'RA_FedAvg vs Other Strategies — Cross-Alpha</div>',
+                unsafe_allow_html=True)
+            st.markdown(
+                '<div class="ra-badge">Aggregates RA_FedAvg clientwise CSV '
+                'and compares mean metric per α against FedAvg / FedProx / '
+                'FedNova JSONs.</div>', unsafe_allow_html=True)
+
+            sel_cmp_m = st.selectbox("Metric for comparison", ra_plot_metrics,
+                                      key="ra_cmp_metric")
+
+            # Build comparison dataframe: one row per (strategy, alpha)
+            cmp_rows = []
+
+            # RA_FedAvg from CSV
+            for a_val, grp in ra_df.groupby(alpha_col_ra):
+                if sel_cmp_m in grp.columns:
+                    cmp_rows.append({
+                        "strategy": "RA_FedAvg",
+                        "alpha":    float(a_val),
+                        sel_cmp_m:  grp[sel_cmp_m].mean(),
+                    })
+
+            # Other strategies from JSON files
+            for strat in ["FedAvg", "FedProx", "FedNova"]:
+                for a_val in _detect_alphas(strat):
+                    m_data = load_metrics(strat, a_val)
+                    if m_data:
+                        vals = [v.get(sel_cmp_m) for v in m_data.values()
+                                if isinstance(v, dict) and sel_cmp_m in v]
+                        if vals:
+                            cmp_rows.append({
+                                "strategy": strat,
+                                "alpha":    float(a_val),
+                                sel_cmp_m:  float(np.mean(vals)),
+                            })
+
+            if cmp_rows:
+                cmp_df = pd.DataFrame(cmp_rows).sort_values(["strategy","alpha"])
+                fig_cmp = px.line(
+                    cmp_df, x="alpha", y=sel_cmp_m,
+                    color="strategy",
+                    color_discrete_map=STRAT_CLR,
+                    markers=True,
+                    title=f"All Strategies — avg {sel_cmp_m} vs α",
+                    labels={"alpha": "Alpha (α)", sel_cmp_m: sel_cmp_m})
+                fig_cmp.update_traces(line_width=2.5, marker_size=9)
+                fig_cmp.update_layout(height=360, **PL)
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+                # Side-by-side bar at selected alpha
+                bar_sub = cmp_df[cmp_df["alpha"].astype(float) == float(alpha)]
+                if not bar_sub.empty:
+                    fig_bar_cmp = px.bar(
+                        bar_sub, x="strategy", y=sel_cmp_m,
+                        color="strategy",
+                        color_discrete_map=STRAT_CLR,
+                        text_auto=".4f",
+                        title=f"{sel_cmp_m} at α={alpha} — all strategies")
+                    fig_bar_cmp.update_traces(textposition="outside")
+                    fig_bar_cmp.update_layout(height=340, showlegend=False, **PL)
+                    st.plotly_chart(fig_bar_cmp, use_container_width=True)
+            else:
+                st.markdown(
+                    '<div class="warn">Not enough data across strategies '
+                    f'for <b>{sel_cmp_m}</b> comparison.</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f'<div class="warn">RAFedAvg clientwise CSV not found.<br>'
+            f'Expected: <code>{ra_csv_display_path}</code></div>',
+            unsafe_allow_html=True)
+
+    # ── Section D: Per-model CSV ──────────────────────────────────
     st.markdown(
         f'<div class="sec" style="margin-top:2rem;">'
         f'{model_type} Model — Results</div>',
         unsafe_allow_html=True)
 
-    model_csv_df      = load_model_results_csv(model_type)
+    model_csv_df       = load_model_results_csv(model_type)
     model_csv_path_str = (model_results_csv_path(model_type) or
                           f"results/Models_Results/{model_type.upper()}"
                           f"_MODEL_RESULTS.CSV")
-
-    _SKIP = {"split","alpha","client","model","algorithm",
-             "strategy","method","arch","round"}
 
     if model_csv_df is not None:
         priority = [c for c in model_csv_df.columns
@@ -709,7 +918,7 @@ with tab1:
             st.markdown(
                 f'<div class="info">📂 <code>{model_csv_path_str}</code>'
                 f'</div>', unsafe_allow_html=True)
-            st.dataframe(model_csv_df, width="stretch")
+            st.dataframe(model_csv_df, use_container_width=True)
         with col_r:
             if num_m:
                 sel_m = st.selectbox("Metric", num_m, key="model_metric")
@@ -721,8 +930,7 @@ with tab1:
                      if any(k in c.lower() for k in
                             ["algorithm","strategy","method"])), None)
 
-                if (alpha_col_m and
-                        model_csv_df[alpha_col_m].nunique() > 1):
+                if (alpha_col_m and model_csv_df[alpha_col_m].nunique() > 1):
                     agg = (model_csv_df
                            .groupby([alpha_col_m] +
                                     ([algo_col_m] if algo_col_m else []))[sel_m]
@@ -751,14 +959,14 @@ with tab1:
                         marker_color=STRAT_CLR.get(fl_strategy,"#58a6ff"),
                         textposition="outside")
                 fig_m.update_layout(height=360, **PL)
-                st.plotly_chart(fig_m, width="stretch")
+                st.plotly_chart(fig_m, use_container_width=True)
     else:
         st.markdown(
             f'<div class="warn">Not found: '
             f'<code>{model_csv_path_str}</code></div>',
             unsafe_allow_html=True)
 
-    # ── Section D: Cross-strategy comparison ─────────────────────
+    # ── Section E: Cross-strategy comparison ─────────────────────
     st.markdown(
         '<div class="sec" style="margin-top:2rem;">'
         'Cross-Strategy Comparison</div>',
@@ -821,9 +1029,9 @@ with tab1:
                                 sel_metric_s: sel_metric_s})
                     fig1.update_traces(line_width=2.5, marker_size=9)
                     fig1.update_layout(height=340, **PL)
-                    st.plotly_chart(fig1, width="stretch")
+                    st.plotly_chart(fig1, use_container_width=True)
                 else:
-                    st.dataframe(plot_df, width="stretch")
+                    st.dataframe(plot_df, use_container_width=True)
 
             with ch2:
                 st.markdown(f"**Per-client breakdown — α={alpha}**")
@@ -839,16 +1047,15 @@ with tab1:
                         color_discrete_map=STRAT_CLR,
                         title=f"{sel_metric_s} per client — α={alpha}",
                         text_auto=".4f")
-                    fig2.update_traces(textposition="outside",
-                                        textfont_size=9)
+                    fig2.update_traces(textposition="outside", textfont_size=9)
                     fig2.update_layout(height=340, **PL)
-                    st.plotly_chart(fig2, width="stretch")
+                    st.plotly_chart(fig2, use_container_width=True)
 
         with st.expander("📋 Full data table"):
-            st.dataframe(plot_df, width="stretch")
+            st.dataframe(plot_df, use_container_width=True)
 
 # ──────────────────────────────────────────────────────────────────
-# TAB 2 — Predicted vs Actual  (all plots from plots/ folder)
+# TAB 2 — Predicted vs Actual
 # ──────────────────────────────────────────────────────────────────
 with tab2:
 
@@ -870,26 +1077,20 @@ with tab2:
         "⚔️  Strategy Comparison",
     ])
 
-    # ══════════════════════════════════════════
-    # PANEL 1 — FINAL RESULTS
-    # ══════════════════════════════════════════
     with panel1:
         st.markdown(
             '<div class="sec">Final Results — All Models & Strategies</div>',
             unsafe_allow_html=True)
 
-        # Model metric cards
         cols = st.columns(5)
         for col, (name, vals) in zip(cols, MODEL_DATA.items()):
             border = "#3fb950" if name == model_type else "#30363d"
             col.markdown(f"""
             <div class="metric-card"
                  style="border-color:{border};border-width:2px;">
-              <div class="metric-label"
-                   style="color:{vals['color']};">
+              <div class="metric-label" style="color:{vals['color']};">
                    {name}{"  ✓" if name == model_type else ""}</div>
-              <div class="metric-value"
-                   style="color:{vals['color']};font-size:1.2rem;">
+              <div class="metric-value" style="color:{vals['color']};font-size:1.2rem;">
                    {vals['MAE']:.4f}</div>
               <div class="metric-sub">MAE</div>
               <div style="font-family:Space Mono,monospace;font-size:.85rem;
@@ -900,35 +1101,26 @@ with tab2:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # four_algo_final_comparison
         st.markdown("**All Four Algorithms — Final Comparison**")
         show_plot(p("four_algo_final_comparison.png"),
                   "Final comparison across all FL algorithms")
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # models_bar_graph
         st.markdown("**Model Performance — MAE & NRMSE**")
         show_plot(p("models_bar_graph.png"),
                   "Performance Comparison — All Deep Models")
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # four_algo_split_vs_rmse
         st.markdown("**RMSE across α splits — All Algorithms**")
         show_plot(p("four_algo_split_vs_rmse.png"),
                   "All algorithms RMSE vs Dirichlet α")
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # bargraph_algo_comparison
         st.markdown("**Algorithm Comparison Bar Chart**")
         show_plot(p("bargraph_algo_comparison.png"),
                   "FL Algorithm comparison")
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Selected model prediction
         st.markdown(
             f'<div class="sec">Selected Model ({model_type}) — '
             f'Predicted vs Actual</div>',
@@ -944,9 +1136,6 @@ with tab2:
           FedAvg outperforms FedProx and FedNova on this dataset.
         </div>""", unsafe_allow_html=True)
 
-    # ══════════════════════════════════════════
-    # PANEL 2 — MODEL COMPARISON
-    # ══════════════════════════════════════════
     with panel2:
         st.markdown(
             '<div class="sec">Predicted vs Actual — All Models</div>',
@@ -959,13 +1148,11 @@ with tab2:
                   if model_type in all_models else 0,
             horizontal=True, key="model_highlight_radio")
 
-        # Full width — highlighted model
         st.markdown(f"**{highlight} — Full View**")
         show_plot(p(f"{highlight.lower()}_vs_actual.png"),
                   f"{highlight}: MAE={MODEL_DATA[highlight]['MAE']:.4f}  "
                   f"NRMSE={MODEL_DATA[highlight]['NRMSE']:.4f}")
 
-        # LSTM before FL training
         if os.path.exists(p("prediction_lstm_before.png")):
             st.markdown(
                 '<div class="sec" style="margin-top:1.2rem;">'
@@ -979,7 +1166,6 @@ with tab2:
             show_plot(p("prediction_lstm_before.png"),
                       "LSTM before federated training")
 
-        # Side by side grid
         st.markdown(
             '<div class="sec" style="margin-top:1.2rem;">'
             'All Models — Side by Side</div>',
@@ -1002,9 +1188,6 @@ with tab2:
                         f'</div>', unsafe_allow_html=True)
                     show_plot(p(f"{name.lower()}_vs_actual.png"), "")
 
-    # ══════════════════════════════════════════
-    # PANEL 3 — STRATEGY COMPARISON
-    # ══════════════════════════════════════════
     with panel3:
         st.markdown(
             '<div class="sec">FL Strategy Comparison</div>',
@@ -1016,17 +1199,13 @@ with tab2:
           <b>FedAvg consistently achieves the lowest RMSE</b>
           across all alpha values on this dataset.
         </div>""", unsafe_allow_html=True)
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # All four algorithms
         st.markdown("**All Four Algorithms — RMSE vs α**")
         show_plot(p("four_algo_split_vs_rmse.png"),
                   "RMSE across all FL strategies and alpha values")
-
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Three strategies
         st.markdown("**FedAvg vs FedProx vs FedNova**")
         show_plot(p("rmse_fedavg_fednova_fedprox.png"),
                   "RMSE: FedAvg vs FedProx vs FedNova")
@@ -1038,11 +1217,9 @@ with tab2:
 
         col_l, col_r = st.columns(2)
         with col_l:
-            show_plot(p("rmse_fedavg_fedprox.png"),
-                      "FedAvg vs FedProx — RMSE")
+            show_plot(p("rmse_fedavg_fedprox.png"), "FedAvg vs FedProx — RMSE")
         with col_r:
-            show_plot(p("rmse_fedavg_fednova.png"),
-                      "FedAvg vs FedNova — RMSE")
+            show_plot(p("rmse_fedavg_fednova.png"), "FedAvg vs FedNova — RMSE")
 
         st.markdown(
             '<div class="sec" style="margin-top:1.5rem;">'
@@ -1055,28 +1232,27 @@ with tab2:
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
-            show_plot(p("fedavg_median_comp.png"),
-                      "FedAvg vs MedianAvg")
+            show_plot(p("fedavg_median_comp.png"), "FedAvg vs MedianAvg")
         with col_b:
-            show_plot(p("simple_fedavg_comp.png"),
-                      "FedAvg vs SimpleAvg")
+            show_plot(p("simple_fedavg_comp.png"), "FedAvg vs SimpleAvg")
         with col_c:
             show_plot(p("fedavg_median_simple.png"),
                       "FedAvg vs SimpleAvg vs MedianAvg")
 
-        # Strategy ranking cards
         st.markdown(
             '<div class="sec" style="margin-top:1.5rem;">'
             'Strategy Ranking</div>',
             unsafe_allow_html=True)
-        r1, r2, r3 = st.columns(3)
+        r1, r2, r3, r4 = st.columns(4)
         for col, label, color, rmse, note in [
-            (r1, "🥇 FedAvg",  "#58a6ff", "RMSE ≈ 0.036–0.045",
+            (r1, "🥇 FedAvg",    "#58a6ff", "RMSE ≈ 0.036–0.045",
              "Best overall. Simple weighted averaging is most effective."),
-            (r2, "🥈 FedProx", "#ffa657", "RMSE ≈ 0.056–0.100",
+            (r2, "🥈 FedProx",   "#ffa657", "RMSE ≈ 0.056–0.100",
              "μ tuning required. Helps at α=1.0, hurts at α=0.5."),
-            (r3, "🥉 FedNova", "#d2a8ff", "RMSE ≈ 0.179–0.184",
+            (r3, "🥉 FedNova",   "#d2a8ff", "RMSE ≈ 0.179–0.184",
              "Normalisation overcorrects when client sizes are similar."),
+            (r4, "⭐ RA_FedAvg", "#a371f7", "See clientwise CSV",
+             "Resource-aware aggregation — adapts to heterogeneous clients."),
         ]:
             col.markdown(f"""
             <div class="metric-card"
@@ -1094,8 +1270,7 @@ with tab2:
 # TAB 3 — Live Inference
 # ──────────────────────────────────────────────────────────────────
 with tab3:
-    st.markdown('<div class="sec">Live Inference</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="sec">Live Inference</div>', unsafe_allow_html=True)
 
     def run_inference(X_np: np.ndarray) -> float:
         X_scaled = scale_input(X_np, scaling_data)
@@ -1110,7 +1285,7 @@ with tab3:
             f'<small style="color:#6e7681">'
             f'Metrics &amp; Plots tabs work normally.<br>'
             f'To enable Live Inference, save a trained model to:<br>'
-            f'<code>results/{fl_strategy.lower()}_results/'
+            f'<code>results/{strategy_folder(fl_strategy)}/'
             f'model_alpha_{alpha}.pth</code></small></div>',
             unsafe_allow_html=True)
     else:
@@ -1142,7 +1317,7 @@ with tab3:
                 unsafe_allow_html=True)
             default_df = pd.DataFrame(
                 np.zeros((SEQUENCE_LEN, n_features)), columns=feat_names)
-            edited = st.data_editor(default_df, width="stretch",
+            edited = st.data_editor(default_df, use_container_width=True,
                                      num_rows="fixed")
 
             if st.button("▶  Run Prediction"):
@@ -1182,7 +1357,7 @@ with tab3:
                         st.caption(f"{len(df_up)} rows × {n_features} features")
                         st.dataframe(
                             df_up[num_cols[:n_features]].tail(SEQUENCE_LEN),
-                            width="stretch")
+                            use_container_width=True)
 
                         ca, cb = st.columns(2)
                         with ca:
@@ -1204,8 +1379,7 @@ with tab3:
                         with cb:
                             if st.button("⚡  Batch (sliding window)"):
                                 if len(feat_data) < SEQUENCE_LEN:
-                                    st.warning(
-                                        f"Need ≥ {SEQUENCE_LEN} rows.")
+                                    st.warning(f"Need ≥ {SEQUENCE_LEN} rows.")
                                 else:
                                     preds_b = [
                                         run_inference(
@@ -1222,7 +1396,8 @@ with tab3:
                                         title="Batch Predictions",
                                         xaxis_title="Window",
                                         yaxis_title="Traffic", **PL)
-                                    st.plotly_chart(fig_b, width="stretch")
+                                    st.plotly_chart(fig_b,
+                                                    use_container_width=True)
                                     dl = pd.DataFrame({"prediction": preds_b})
                                     st.download_button(
                                         "⬇ Download CSV",
