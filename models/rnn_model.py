@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+#initials
 class TrafficPredictorRNN(nn.Module):
     def __init__(
         self,

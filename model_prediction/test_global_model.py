@@ -14,14 +14,14 @@ from models.mlp_model import TrafficPredictorMLP
 
 # ===== CONFIG =====
 DATA_PATH = "Dataset/full_dataset.csv"
-MODEL_PATH = "global_model_rnn.pth"
-SCALER_PATH = "scaling_params.pt"
+MODEL_PATH = "saved_models/global_model.pth"
+SCALER_PATH = "saved_models/scaling_params.pt"
 SEQ_LEN = 10
 COLUMN = "down"
 
-MODEL_PATH_LSTM = "global_model.pth"
-MODEL_PATH_GRU = "global_model_gru.pth"
-MODEL_PATH_MLP = "global_model_mlp.pth"
+MODEL_PATH_LSTM = "saved_models/global_model.pth"
+MODEL_PATH_GRU = "saved_models/global_model_gru.pth"
+MODEL_PATH_MLP = "saved_models/global_model_mlp.pth"
 
 # ===== Command-line argument for model type =====
 parser = argparse.ArgumentParser()
@@ -140,14 +140,14 @@ def evaluate_model():
         "NRMSE": nrmse
     }])
 
-    file_path = "results/RNN_MODEL_RESULTS.csv"
+    file_path = "results/Models_Results/GRU_MODEL_RESULTS.csv"
 
     if os.path.exists(file_path):
         new_row.to_csv(file_path, mode='a', header=False, index=False)
     else:
         new_row.to_csv(file_path, mode='w', header=True, index=False)
 
-    print("✅ Metrics saved to results/RNN_MODEL_RESULT.csv")
+    print("✅ Metrics saved to results/Model_Results/GRU_MODEL_RESULT.csv")
 
     # ===== Plot predictions =====
     plt.figure(figsize=(10, 5))
@@ -164,7 +164,7 @@ def evaluate_model():
                fontsize=10,
                bbox=dict(facecolor='white', alpha=0.8),
                transform=plt.gca().transAxes)
-    plt.savefig("plots/prediction_lstm.png", dpi=300, bbox_inches="tight")
+    plt.savefig("plots/gru_vs_actual.png", dpi=300, bbox_inches="tight")
     plt.show()
 
 
