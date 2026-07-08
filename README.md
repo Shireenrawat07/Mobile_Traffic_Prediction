@@ -75,7 +75,7 @@ The project uses a real-world LTE traffic dataset collected from multiple base s
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/Federated-5G-Traffic-Prediction.git
+git clone https://github.com/Shireenrawat07/Mobile_Traffic_Prediction.git
 cd Federated-5G-Traffic-Prediction
 pip install -r requirements.txt
 ```
